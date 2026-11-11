@@ -1,0 +1,7 @@
+package-as: KidSafe
+
+ignore:
+  - tests
+  - README.md
+  - .github
+  - .gitignore
