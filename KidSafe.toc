@@ -2,7 +2,7 @@
 ## Title: |cff66ccffKidSafe|r
 ## Notes: Makes the game kid friendly: blocks whispers, channels, invites, trades and strangers' chat, and locks the language filter on.
 ## Author: Kaeldrom
-## Version: 1.2.0
+## Version: 1.3.0
 ## SavedVariables: KidSafeDB
 ## AddonCompartmentFunc: KidSafe_OpenPanel
 ## IconTexture: Interface\Icons\Spell_Holy_PowerWordShield

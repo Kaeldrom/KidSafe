@@ -296,5 +296,34 @@ check("adultPin off: no lock at login", typ("hi", "SAY") == "hi")
 api.Unlock("2468"); api.SetAdultPin(True); api.Lock()
 fresh_login("Newkid2", 1); pew(True, False)
 check("new kid char still protected", typ("hi", "SAY") == "")
+# ---------- locked windows ----------
+lua.execute('''
+  function Widget:SetEnabled(v) self.enabled = v end
+  CommunitiesFrame = CreateFrame("Frame"); SettingsPanel = CreateFrame("Frame")
+  EditModeManagerFrame = CreateFrame("Frame")
+  GameMenuFrame = CreateFrame("Frame")
+  optBtn = CreateFrame("Button"); optBtn.text = "Options"; optBtn.enabled = true
+  editBtn = CreateFrame("Button"); editBtn.text = "Edit Mode"; editBtn.enabled = true
+  function GameMenuFrame:GetChildren() return optBtn, editBtn end
+''')
+G.KidSafeFrame.scripts.OnEvent(G.KidSafeFrame, "ADDON_LOADED", "Blizzard_Communities")
+fresh_login("Newkid2", 1); pew(True, False)
+G.CommunitiesFrame.Show(G.CommunitiesFrame)
+check("guild window blocked for child", not G.CommunitiesFrame.shown)
+G.SettingsPanel.Show(G.SettingsPanel)
+check("options blocked for child", not G.SettingsPanel.shown)
+G.GameMenuFrame.Show(G.GameMenuFrame)
+check("Options button greyed", G.optBtn.enabled == False)
+check("Edit Mode button left alone", G.editBtn.enabled == True)
+G.GameMenuFrame.Hide(G.GameMenuFrame)
+check("button handed back enabled on close", G.optBtn.enabled == True)
+G.EditModeManagerFrame.Show(G.EditModeManagerFrame)
+check("Edit Mode opens", G.EditModeManagerFrame.shown)
+whisper_notices = [m for m in G.printed.values() if "private message" in str(m) or "/p" in str(m)]
+check("no whisper or /p notices", not whisper_notices)
+fresh_login("First"); pew(True, False); api.UnlockAdult("2468")
+G.CommunitiesFrame.Show(G.CommunitiesFrame); G.SettingsPanel.Show(G.SettingsPanel)
+G.GameMenuFrame.Show(G.GameMenuFrame)
+check("unlocked grown-up: guild, options and button work", G.CommunitiesFrame.shown and G.SettingsPanel.shown and G.optBtn.enabled == True)
 print("FAILURES TOTAL:", fails)
 sys.exit(1 if fails else 0)

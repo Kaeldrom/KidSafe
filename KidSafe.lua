@@ -342,7 +342,6 @@ local function FilterAlways(self, event, msg, author, a3, a4, a5, flags, a7, a8,
     if not FirstTime(lineID) then return true end
     if kind == "whisper" or kind == "bnet-whisper" then
         Log(kind, author, msg)
-        Notice("whisper", "a private message from someone was hidden to keep you safe.", 60)
     elseif kind == "guild" or kind == "afk-reply" or kind == "dnd-reply" then
         Log(kind, author, msg)
     elseif not QUIET[kind] then
@@ -411,13 +410,11 @@ handlers.GUILD_INVITE_REQUEST = function(inviter, guildName)
     if GuildInviteFrame then GuildInviteFrame:Hide() end
     HidePopup("GUILD_INVITE")
     Log("guild-invite", inviter, guildName)
-    Notice("guild", "a guild invite was turned down for you.", 20)
 end
 
 handlers.PETITION_SHOW = function()
     SafeCall(ClosePetition)
     Log("guild-charter", "?", "guild charter signature request")
-    Notice("petition", "guild charter signing is turned off.", 20)
 end
 
 handlers.CLUB_INVITATION_ADDED_FOR_SELF = function(invitation)
@@ -442,7 +439,6 @@ handlers.BN_FRIEND_INVITE_ADDED = function()
             Log("friend-request", info.accountName, "Battle.net friend request")
         end
     end
-    Notice("bnfriend", "a friend request from someone was turned down.", 20)
 end
 
 handlers.DUEL_REQUESTED = function(challenger)
@@ -465,7 +461,6 @@ handlers.PARTY_INVITE_REQUEST = function(inviter)
     HidePopup("PARTY_INVITE")
     if LFGInvitePopup and LFGInvitePopup:IsShown() then LFGInvitePopup:Hide() end
     Log("group-invite", inviter, "group invite")
-    Notice("party", "a group invite from someone you don't know was turned down. Use the Dungeon Finder to group up!", 20)
 end
 
 handlers.GROUP_INVITE_CONFIRMATION = function()
@@ -552,7 +547,7 @@ local function GuardEditBox(editBox)
         if cmd then
             cmd = cmd:lower()
             if blockedCmds[cmd] then
-                return Wipe(editBox, "cmd", "that kind of chat is turned off. Use /p to talk to your group!")
+                return Wipe(editBox, "cmd", "that kind of chat is turned off.")
             elseif groupCmds[cmd] then
                 local p = LooksPersonal(rest)
                 if p then return Wipe(editBox, "personal", "please don't share " .. p .. " online! Keep private stuff secret.") end
@@ -568,7 +563,7 @@ local function GuardEditBox(editBox)
         if IsTrusted(target) then chatType = nil end
     end
     if chatType and BLOCKED_TYPES[chatType] then
-        return Wipe(editBox, "type", BLOCKED_TYPES[chatType] .. " is turned off. Type /p and a space to talk to your group!")
+        return Wipe(editBox, "type", BLOCKED_TYPES[chatType] .. " is turned off.")
     end
     local p = LooksPersonal(text)
     if p then
@@ -590,16 +585,86 @@ end
 ---------------------------------------------------------------------------
 -- Self-protection: in-game AddOns list, /run, /script, /console
 ---------------------------------------------------------------------------
-local function HookAddonList()
-    if AddonList and not KS.addonListHooked then
-        KS.addonListHooked = true
-        AddonList:HookScript("OnShow", function(self)
-            if Protected() then
-                self:Hide()
-                Notice("addons", "the AddOns list is locked. Ask a grown-up!", 5)
-            end
-        end)
+-- Windows a child can't open. Blizzard_Communities etc. load on demand, so this is
+-- re-run on every ADDON_LOADED and hooks each frame the first time it exists.
+local LOCKED_FRAMES = {
+    AddonList                 = "the AddOns list is locked. Ask a grown-up!",
+    -- Guild & Communities (J): shows guild chat, live and history
+    CommunitiesFrame          = "the Guild & Communities window is locked. Ask a grown-up!",
+    GuildFrame                = "the Guild window is locked. Ask a grown-up!",
+    LookingForGuildFrame      = "the Guild window is locked. Ask a grown-up!",
+    ClubFinderGuildFinderFrame = "the Guild window is locked. Ask a grown-up!",
+    -- Options / Settings (Edit Mode is a separate window and stays available)
+    SettingsPanel             = "Options are locked by a grown-up.",
+    InterfaceOptionsFrame     = "Options are locked by a grown-up.",
+    VideoOptionsFrame         = "Options are locked by a grown-up.",
+    AudioOptionsFrame         = "Options are locked by a grown-up.",
+}
+local hookedFrames = {}
+
+local function CloseLocked(frame, msg)
+    if not Protected() then return end
+    frame:Hide()
+    -- some windows finish opening after OnShow; make sure it stays shut
+    C_Timer.After(0, function() if Protected() and frame:IsShown() then frame:Hide() end end)
+    Notice("locked", msg, 3)
+end
+
+local function HookLockedFrames()
+    for name, msg in pairs(LOCKED_FRAMES) do
+        local f = _G[name]
+        if f and not hookedFrames[f] and f.HookScript then
+            hookedFrames[f] = true
+            f:HookScript("OnShow", function(self) CloseLocked(self, msg) end)
+            if f:IsShown() then CloseLocked(f, msg) end
+        end
     end
+end
+
+-- Grey out the Options button in the Escape menu (the window itself is locked above)
+-- (select("#") instead of ipairs: any of these globals may be missing, and ipairs stops at the first nil)
+local OPTION_LABELS = {}
+local function Labels(value, ...)
+    for i = 1, select("#", ...) do
+        local v = select(i, ...)
+        if type(v) == "string" then OPTION_LABELS[v] = value end
+    end
+end
+Labels(true, GAMEMENU_OPTIONS, GAMEMENU_SETTINGS, SETTINGS, UIOPTIONS_MENU, VIDEOOPTIONS_MENU,
+    "Options", "Settings", "Interface", "Video", "Sound")
+Labels(nil, HUD_EDIT_MODE_MENU, "Edit Mode")
+local greyed = {}
+
+local function GreyGameMenu()
+    if not GameMenuFrame then return end
+    for _, b in ipairs({ GameMenuFrame:GetChildren() }) do
+        if b.GetText and b.SetEnabled then
+            local ok, t = pcall(b.GetText, b)
+            if ok and type(t) == "string" and OPTION_LABELS[t] and Protected() then
+                pcall(b.SetEnabled, b, false)
+                greyed[b] = true
+            end
+        end
+    end
+end
+
+local function UngreyGameMenu()
+    -- buttons are pooled and reused for other entries, so always hand them back enabled
+    for b in pairs(greyed) do pcall(b.SetEnabled, b, true) end
+    wipe(greyed)
+end
+
+local function HookGameMenu()
+    if GameMenuFrame and not hookedFrames[GameMenuFrame] then
+        hookedFrames[GameMenuFrame] = true
+        GameMenuFrame:HookScript("OnShow", function() GreyGameMenu(); C_Timer.After(0, GreyGameMenu) end)
+        GameMenuFrame:HookScript("OnHide", UngreyGameMenu)
+    end
+end
+
+local function HookAddonList()
+    HookLockedFrames()
+    HookGameMenu()
 end
 
 local function LockSlash(key)

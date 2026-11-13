@@ -10,7 +10,9 @@ A World of Warcraft **Forever** addon (interface 16001) that makes the game safe
 - **Stops the child typing personal info:** phone numbers, email addresses, "I live...", "my school", passwords.
 - **Declines automatically:** guild invites, guild charters, community invites, friend requests, duels, pet battle duels, group invites from strangers (the Dungeon Finder still works) and trades.
 - **Locks game settings:** language filter, spam filter, block trades, block channel invites, no speech bubbles from strangers, no guild names over heads, less blood. If anything changes them, they're put back.
+- **Locks windows:** Guild & Communities (J), so guild chat can't be read there, and Options/Settings (the Escape menu button is greyed out). Edit Mode still works.
 - **Protects itself:** the in-game AddOns list, `/run`, `/script` and `/console` are locked.
+- **Stays quiet:** the child isn't told when someone tried to whisper, invite or friend them; it's all in the parent log.
 - **Break reminder** every 60 minutes (adjustable).
 - **Logs everything it blocks**, so a parent can review it.
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.0
+- Guild & Communities window (J) is locked on children's characters, so guild chat (live and history) can't be read there.
+- Options/Settings window is locked and the Options button in the Escape menu is greyed out. Edit Mode still works, so UI can be moved around.
+- Quieter: no more "use /p" tips, and the child isn't told when someone tried to whisper, invite or friend them (it's still in the parent log).
+
 ## 1.2.0
 - Grown-up characters ask for the parent PIN at every login and lock again on logout or AFK, so a child logging in to a parent's character stays protected. A /reload doesn't ask again.
 - "Lock this character now" button and `/kidsafe lockme`.
