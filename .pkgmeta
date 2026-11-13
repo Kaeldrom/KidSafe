@@ -5,3 +5,4 @@ ignore:
   - README.md
   - .github
   - .gitignore
+  - logo.png
