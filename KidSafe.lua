@@ -153,6 +153,24 @@ local function IsFamily(name)
 end
 KS.IsFamily = IsFamily
 
+-- Groups with strangers:
+--   "family" - family only
+--   "quests" - strangers may group in the open world (quests, elites); no dungeons, raids or battlegrounds
+--   "open"   - strangers anywhere
+-- Messages and voice with strangers are off in every mode.
+local POLICIES = { family = true, quests = true, open = true }
+local function Policy()
+    local p = KidSafeDB and KidSafeDB.groupPolicy
+    if p == "quiet" then p = "open" end -- 1.4.0 name
+    return POLICIES[p] and p or "quests"
+end
+
+-- things other players can see happen after a short, uneven pause, the way a person would do them
+local function Later(fn)
+    local wait = 2 + (math.random and math.random() * 4 or 2)
+    C_Timer.After(wait, fn)
+end
+
 local function IsSelf(name, guid)
     if Readable(guid) and guid == UnitGUID("player") then return true end
     local n = NormName(name)
@@ -515,7 +533,7 @@ handlers.PET_BATTLE_PVP_DUEL_REQUESTED = function(challenger)
 end
 
 handlers.PARTY_INVITE_REQUEST = function(inviter)
-    if IsFamily(inviter) then return end
+    if IsFamily(inviter) or Policy() ~= "family" then return end
     SafeCall(DeclineGroup)
     HidePopup("PARTY_INVITE")
     if LFGInvitePopup and LFGInvitePopup:IsShown() then LFGInvitePopup:Hide() end
@@ -528,7 +546,7 @@ handlers.GROUP_INVITE_CONFIRMATION = function()
     local guid = GetNextPendingInviteConfirmation()
     if guid then
         local _, name = GetInviteConfirmationInfo and GetInviteConfirmationInfo(guid)
-        if not IsFamily(name) then
+        if not IsFamily(name) and Policy() == "family" then
             SafeCall(RespondToInviteConfirmation, guid, false)
             HidePopup("GROUP_INVITE_CONFIRMATION")
             Log("join-request", name, "asked to join the group")
@@ -556,8 +574,13 @@ end
 -- Groups: family only (default). A stranger who gets in - whoever invited them - is removed,
 -- or the kid leaves. A grown-up can allow groups with strangers ("quiet"): chat stays off either way.
 ---------------------------------------------------------------------------
-local function GroupPolicy() return KidSafeDB.groupPolicy or "family" end
+local GroupPolicy = Policy
 KS.GroupPolicy = GroupPolicy
+
+-- quest groups: when did the kid last make progress on a quest?
+local lastProgress = 0
+local function Progress() lastProgress = GetTime() end
+KS.IDLE_LEAVE = 20 * 60
 
 local function Uninvite(name)
     local fn = (C_PartyInfo and C_PartyInfo.UninviteUnit) or UninviteUnit
@@ -568,28 +591,67 @@ local function LeaveGroup()
     if fn then SafeCall(fn) end
 end
 
+local leaving = false
+local function LeaveLater(why, who)
+    if leaving then return end
+    leaving = true
+    Later(function()
+        leaving = false
+        if Protected() and #Strangers() > 0 then
+            Log("group-left", who or "?", why)
+            LeaveGroup()
+        end
+    end)
+end
+
+-- quest groups: open world only, and not forever
+local function QuestGroupCheck(list)
+    local inInstance, kind = false, nil
+    if IsInInstance then inInstance, kind = IsInInstance() end
+    if (IsInRaid and IsInRaid()) then
+        return LeaveLater("left a raid group with people we don't know", list[1].name)
+    end
+    if inInstance and kind ~= "none" then
+        return LeaveLater("left a " .. tostring(kind) .. " group with people we don't know", list[1].name)
+    end
+    if lastProgress > 0 and GetTime() - lastProgress > KS.IDLE_LEAVE then
+        return LeaveLater("left a group after a long time with no quest progress", list[1].name)
+    end
+end
+
 local function EnforceGroup()
-    if not Protected() or GroupPolicy() ~= "family" then return end
+    if not Protected() then return end
     local list = Strangers()
     if #list == 0 then return end
+    local policy = GroupPolicy()
+    if policy == "open" then return end
+    if policy == "quests" then return QuestGroupCheck(list) end
     local lead = UnitIsGroupLeader and UnitIsGroupLeader("player")
     local instanceGroup = IsInGroup and LE_PARTY_CATEGORY_INSTANCE and IsInGroup(LE_PARTY_CATEGORY_INSTANCE)
-    if lead and not instanceGroup then
-        for _, s in ipairs(list) do
-            if s.name then Uninvite(s.name) end
-            Log("group-removed", s.name or "?", "removed from the group")
-        end
-        if #list > 0 and list[1].name == nil then LeaveGroup() end
+    if lead and not instanceGroup and list[1].name then
+        if leaving then return end
+        leaving = true
+        Later(function()
+            leaving = false
+            for _, s in ipairs(Strangers()) do
+                if s.name then Uninvite(s.name) end
+                Log("group-removed", s.name or "?", "removed from the group")
+            end
+        end)
     else
-        Log("group-left", list[1].name or "?", "left a group with people we don't know")
-        LeaveGroup()
+        LeaveLater("left a group with people we don't know", list[1].name)
     end
     Notice("group", "you can only be in a group with family. Ask a grown-up to add a friend.", 10)
 end
 KS.EnforceGroup = EnforceGroup
 
 handlers.GROUP_ROSTER_UPDATE = function() EnforceGroup() end
-handlers.GROUP_JOINED = function() EnforceGroup() end
+handlers.GROUP_JOINED = function() Progress(); EnforceGroup() end
+handlers.ZONE_CHANGED_NEW_AREA = function() EnforceGroup() end
+handlers.UNIT_QUEST_LOG_CHANGED = function(unit) if unit == "player" then Progress() end end
+handlers.QUEST_WATCH_UPDATE = function() Progress() end
+handlers.QUEST_TURNED_IN = function() Progress() end
+handlers.QUEST_ACCEPTED = function() Progress() end
 
 -- invites sent from menus (right-click, friends list...): cancel them straight away
 local function HookInvites()
@@ -762,7 +824,7 @@ local function GuardEditBox(editBox)
             cmd = cmd:lower()
             if blockedCmds[cmd] then
                 return Wipe(editBox, "cmd", "that kind of chat is turned off.")
-            elseif inviteCmds[cmd] then
+            elseif inviteCmds[cmd] and Policy() == "family" then
                 local who = rest:gsub("^%s+", ""):gsub("%s+$", "")
                 if who == "" then who = UnitFull("target") or "" end
                 if not IsFamily(who) then
@@ -841,10 +903,19 @@ local LOCKED_FRAMES = {
     ChannelFrame              = "chat and voice channels are locked.",
     AudioOptionsFrame         = "Options are locked by a grown-up.",
 }
+-- queue windows that put the child in a group of strangers (locked unless groups are "open")
+local QUEUE_FRAMES = {
+    LFDParentFrame = true, PVEFrame = true, RaidFinderFrame = true, LFGParentFrame = true,
+    PVPUIFrame = true, PVPFrame = true, BattlefieldFrame = true, HonorFrame = true,
+}
+for name in pairs(QUEUE_FRAMES) do
+    LOCKED_FRAMES[name] = "dungeon and battleground queues are locked. Ask a grown-up!"
+end
 local hookedFrames = {}
 
 local function CloseLocked(frame, msg)
     if not Protected() then return end
+    if QUEUE_FRAMES[frame.ksName or ""] and Policy() == "open" then return end
     frame:Hide()
     -- some windows finish opening after OnShow; make sure it stays shut
     C_Timer.After(0, function() if Protected() and frame:IsShown() then frame:Hide() end end)
@@ -856,6 +927,7 @@ local function HookLockedFrames()
         local f = _G[name]
         if f and not hookedFrames[f] and f.HookScript then
             hookedFrames[f] = true
+            f.ksName = name
             f:HookScript("OnShow", function(self) CloseLocked(self, msg) end)
             if f:IsShown() then CloseLocked(f, msg) end
         end
@@ -987,10 +1059,10 @@ local function BuildOptionsPage()
         "  - Private messages (whispers) are blocked",
         "  - Public chat channels (General, Trade, LFG...) are switched off",
         "  - You only see chat from family your grown-up added, and Game Masters",
-        "  - You can only be in a group with family, and group chat is family only",
+        "  - Group chat is family only: other players in your group can't message you",
         "  - Voice chat is off, and letters from people you don't know are hidden",
         "  - Guild invites, friend requests, duels and trades are turned down",
-        "  - Group invites from strangers are turned down, and you can only invite family",
+        "  - Dungeon and battleground queues are switched off",
         "  - The language filter is always on",
         "  - KidSafe stops you typing private things like phone numbers or where you live",
         "  - You'll get a reminder to take a break",
@@ -1228,7 +1300,7 @@ local function Help()
     Print("/kidsafe setpin 1234  - first time only: choose a parent PIN")
     Print("/kidsafe unlock 1234  - parent mode (pauses KidSafe until /kidsafe lock or relog)")
     Print("/kidsafe lock  - turn protection back on")
-    Print("With the PIN unlocked:  trust <First Surname> | untrust <name> | trusted | groups family|quiet | log [n] | clearlog | break <minutes, 0=off> | newpin <pin> | restore")
+    Print("With the PIN unlocked:  trust <First Surname> | untrust <name> | trusted | groups family|quests|open | log [n] | clearlog | break <minutes, 0=off> | newpin <pin> | restore")
     Print("  adult - this is a grown-up's character (KidSafe off) | child - protect this character | chars")
     Print("  lockme - lock this grown-up's character now (needs the PIN to unlock)")
     Print("Or just type /kidsafe on its own for the parent control window.")
@@ -1282,12 +1354,17 @@ SlashCmdList.KIDSAFE = function(input)
 
     elseif cmd == "groups" then
         if not NeedParent() then return end
-        if arg == "family" or arg == "quiet" then
+        if arg == "quiet" then arg = "open" end
+        local say = {
+            family = "groups: family only (strangers are removed, or the child leaves).",
+            quests = "groups: strangers allowed in the open world for quests; no dungeons, raids or battlegrounds. No chat with them.",
+            open = "groups: strangers allowed anywhere, dungeons too. No chat with them.",
+        }
+        if say[arg] then
             KidSafeDB.groupPolicy = arg
-            return Print(arg == "family" and "groups: family only (strangers are removed, or the child leaves)."
-                or "groups: strangers allowed (dungeons), but chat with them stays off.")
+            return Print(say[arg])
         end
-        return Print("usage: /kidsafe groups family | quiet   (now: " .. GroupPolicy() .. ")")
+        return Print("usage: /kidsafe groups family | quests | open   (now: " .. GroupPolicy() .. ")")
 
     elseif cmd == "trusted" then
         if not NeedParent() then return end

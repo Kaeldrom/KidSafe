@@ -1,15 +1,20 @@
 # Changelog
 
 ## 1.4.0
-- **Fix: a child could invite a stranger and chat with them in /p.** Groups are now family only: the trusted list plus this account's characters. Strangers who get in are removed (or the child leaves); invites to strangers are cancelled, typed or from menus.
-- Group chat is family only both ways, even with a grown-up's permission for dungeon groups (`/kidsafe groups quiet`). Strangers in the group can't be heard in /say or emotes either. Group speech bubbles are off.
+- **Fix: a child could invite a stranger and chat with them in /p.** Messages and voice with anyone who isn't family (trusted list + this account's characters) are now off everywhere, whatever the group.
+- Groups, chosen by a grown-up with `/kidsafe groups`:
+  - **quests** (default): strangers can group in the open world for group quests and elites. No dungeons, raids or battlegrounds with strangers (the child leaves), the queue windows are locked, and a group with no quest progress for 20 minutes is left.
+  - **family**: family only; strangers are removed (or the child leaves) and invites to strangers are cancelled.
+  - **open**: strangers anywhere, dungeons too.
+- Nothing tells other players that KidSafe is there: no announcements, and leaving or removing happens after a short, uneven pause. To others the child is just someone who doesn't talk.
+- Group chat is family only both ways; strangers in the group can't be heard in /say or emotes either. Group speech bubbles are off.
 - Unreadable messages or names (secret values) are hidden, not shown.
 - Voice chat: muted, deafened, removed from voice channels; voice-to-text hidden; the channels window is locked.
 - Mail: Send is disabled unless the recipient is family; strangers' letters show no subject or text and can't be replied to.
 - Macros: lines run by macros are checked like typed chat; the macro window is locked.
 - Calendar, group finder listings and Add Friend are locked (other players write text there).
 - Trusted names must be the full "First Surname" so a stranger with the same first name doesn't count.
-- 180 automated checks, including a bypass hunt that fails on 1.3.0.
+- 198 automated checks, including a bypass hunt that fails on 1.3.0.
 
 ## 1.3.0
 - Guild & Communities window (J) is locked on children's characters, so guild chat (live and history) can't be read there.

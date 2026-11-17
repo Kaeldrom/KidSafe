@@ -5,7 +5,8 @@ A World of Warcraft **Forever** addon (interface 16001) that makes the game safe
 ## What it does on a child's character
 - **Blocks private messages** (whispers and Battle.net whispers) in and out. Game Masters and trusted people still get through.
 - **Leaves all public chat channels** (General, Trade, LFG, custom) and declines channel invites.
-- **Family only.** The child can only chat with, group with, mail, trade and duel family: the trusted list (full "First Surname" names) plus the characters on this account. Strangers who end up in the group are removed (or the child leaves), and group chat with strangers is off both ways. A grown-up can allow dungeon groups with strangers with `/kidsafe groups quiet`; chat with them stays off.
+- **No messages with strangers, in or out of a group.** Only family can chat, whisper, mail, trade or duel with the child: the trusted list (full "First Surname" names) plus the characters on this account.
+- **Groups** (`/kidsafe groups`): **quests** (default) lets strangers group in the open world for group quests and elites, but not dungeons, raids or battlegrounds, and a group with no quest progress for 20 minutes is left; **family** is family only; **open** allows dungeons with strangers too. Chat with strangers stays off in every mode, and nothing tells other players KidSafe is there.
 - **No voice chat:** muted, deafened, and taken out of any voice channel; voice-to-text is hidden.
 - **Mail:** letters can only be sent to family; letters from strangers show no text (items and gold still arrive).
 - **Macros can't get round it:** macro lines are checked like typed chat, and the macro window is locked.

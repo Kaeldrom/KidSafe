@@ -192,8 +192,9 @@ check("secret party msg hidden (fail closed)", filt("CHAT_MSG_PARTY", "SECRET", 
 check("secret sender hidden (fail closed)", filt("CHAT_MSG_PARTY", "hello", "SECRET", lineID=26)[0])
 G.KidSafeDB.trusted["buddy"] = None
 
+G.KidSafeDB.groupPolicy = "family"
 fire("PARTY_INVITE_REQUEST", "Rando")
-check("party invite declined", "DeclineGroup" in calls())
+check("party invite declined (family only)", "DeclineGroup" in calls())
 fire("GUILD_INVITE_REQUEST", "Rando", "Bad Guild")
 check("guild declined", "DeclineGuild" in calls())
 fire("DUEL_REQUESTED", "Rando"); check("duel cancelled", "CancelDuel" in calls())
@@ -393,6 +394,7 @@ lua.execute("""
   end
 """)
 check("bypass setup: child protected", api.Protected())
+G.KidSafeDB.groupPolicy = "family"
 def last(name):
     return [c for c in G.calls.values() if c[1] == name]
 
@@ -419,12 +421,12 @@ check("stranger in group: /say hidden", filt("CHAT_MSG_SAY", "hi", "Random Perso
 check("stranger in group: custom emote hidden", filt("CHAT_MSG_EMOTE", "hugs you", "Random Person", lineID=905)[0])
 check("group bubbles off (they skip chat filters)", G.cvars.chatBubblesParty == "0")
 
-# --- 2. quiet mode (grown-up allows dungeon groups): grouped, but still no chat
-G.KidSafeDB.groupPolicy = "quiet"; G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
-check("quiet: stranger may stay", len(last("LeaveParty")) == 0 and len(last("Uninvite")) == 0)
-check("quiet: /p still wiped", typ("/p hi", "SAY") == "")
-check("quiet: stranger's party chat still hidden", filt("CHAT_MSG_PARTY", "hi", "Random Person", lineID=906)[0])
-G.KidSafeDB.groupPolicy = None
+# --- 2. open groups (grown-up allows dungeons): grouped, but still no chat
+G.KidSafeDB.groupPolicy = "open"; G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+check("open: stranger may stay", len(last("LeaveParty")) == 0 and len(last("Uninvite")) == 0)
+check("open: /p still wiped", typ("/p hi", "SAY") == "")
+check("open: stranger's party chat still hidden", filt("CHAT_MSG_PARTY", "hi", "Random Person", lineID=906)[0])
+G.KidSafeDB.groupPolicy = "family"
 
 # --- 3. family is fine
 G.KidSafeDB.trusted["mum smith"] = True
@@ -510,10 +512,10 @@ for fname in FR:
     check(fname + " locked", not f.shown)
 
 # --- 9. still no way to switch any of it off
-G.hash_SlashCmdList["/run"]("KidSafeDB.groupPolicy='quiet'")
-check("/run still locked", G.KidSafeDB.groupPolicy is None)
-sc("groups quiet")
-check("group setting needs the PIN", G.KidSafeDB.groupPolicy is None)
+G.hash_SlashCmdList["/run"]("KidSafeDB.groupPolicy='open'")
+check("/run still locked", G.KidSafeDB.groupPolicy == "family")
+sc("groups open")
+check("group setting needs the PIN", G.KidSafeDB.groupPolicy == "family")
 sc("trust Random Person")
 check("trusting needs the PIN", G.KidSafeDB.trusted["random person"] is None)
 
@@ -524,6 +526,62 @@ G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
 check("unlocked grown-up: groups with strangers untouched", len(last("LeaveParty")) == 0)
 check("unlocked grown-up: /p works", typ("/p hi", "SAY") == "/p hi")
 lua.execute('ROSTER = {}')
+
+
+# --- 11. quest groups (the default): strangers OK in the open world, never chat, no dungeons
+G.KidSafeDB.chars["Bokor-Realm"] = "child"
+fresh_login("Bokor", 20); pew(True, False)
+lua.execute("""
+  function UnitName(u)
+    if ROSTER[u] then return ROSTER[u][1], ROSTER[u][2] end
+    if u == "NPC" then return tradePartner end
+    return "Bokor"
+  end
+  INSTANCE = { false, "none" }
+  function IsInInstance() return INSTANCE[1], INSTANCE[2] end
+  RAID = false
+  function IsInRaid() return RAID end
+""")
+G.KidSafeDB.groupPolicy = None
+check("default is quest groups", G.KidSafe.GroupPolicy() == "quests")
+G.calls = lua.table(); fire("PARTY_INVITE_REQUEST", "Random Person")
+check("quests: a stranger's invite isn't auto-declined", "DeclineGroup" not in calls())
+check("quests: inviting a stranger is allowed", typ("/invite Random Person", "SAY") == "/invite Random Person")
+lua.execute('ROSTER = { party1 = {"Random", "Person"} }; LEADER = false')
+G.calls = lua.table(); fire("GROUP_JOINED"); fire("GROUP_ROSTER_UPDATE")
+check("quests: open-world group with a stranger stays", len(last("LeaveParty")) == 0 and len(last("Uninvite")) == 0)
+check("quests: /p to the stranger still wiped", typ("/p hi", "SAY") == "")
+check("quests: stranger's party chat still hidden", filt("CHAT_MSG_PARTY", "you noob", "Random Person", lineID=950)[0])
+check("quests: no message is sent to the group about KidSafe", not any(c[1] == "SendChatMessage" for c in G.calls.values()))
+lua.execute('INSTANCE = { true, "party" }'); G.calls = lua.table(); fire("ZONE_CHANGED_NEW_AREA")
+check("quests: entering a dungeon with strangers -> leaves", len(last("LeaveParty")) == 1)
+lua.execute('INSTANCE = { true, "pvp" }'); G.calls = lua.table(); fire("ZONE_CHANGED_NEW_AREA")
+check("quests: battleground with strangers -> leaves", len(last("LeaveParty")) == 1)
+lua.execute('INSTANCE = { false, "none" }; RAID = true; ROSTER = { raid1 = {"Random", "Person"} }'); G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+check("quests: turned into a raid -> leaves", len(last("LeaveParty")) == 1)
+lua.execute('RAID = false; ROSTER = { party1 = {"Random", "Person"} }')
+G.T = 100000; fire("QUEST_WATCH_UPDATE"); G.T = 100000 + 19 * 60
+G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+check("quests: 19 minutes without progress: stays", len(last("LeaveParty")) == 0)
+G.T = 100000 + 21 * 60; G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+check("quests: 21 minutes without quest progress -> leaves", len(last("LeaveParty")) == 1)
+lua.execute('ROSTER = { party1 = {"Mum", "Smith"} }'); G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+lua.execute('INSTANCE = { true, "party" }'); fire("ZONE_CHANGED_NEW_AREA")
+check("quests: dungeon with family only is fine", len(last("LeaveParty")) == 0)
+lua.execute('INSTANCE = { false, "none" }; ROSTER = {}')
+lua.execute('LFDParentFrame = CreateFrame("Frame"); PVPUIFrame = CreateFrame("Frame")'); fire("ADDON_LOADED", "Blizzard_PVPUI")
+G.LFDParentFrame.Show(G.LFDParentFrame); G.PVPUIFrame.Show(G.PVPUIFrame)
+check("quests: dungeon and battleground queues locked", not G.LFDParentFrame.shown and not G.PVPUIFrame.shown)
+G.KidSafeDB.groupPolicy = "open"
+G.LFDParentFrame.Show(G.LFDParentFrame)
+check("open: dungeon queue allowed", G.LFDParentFrame.shown)
+lua.execute('ROSTER = { party1 = {"Random", "Person"} }; INSTANCE = { true, "party" }'); G.calls = lua.table(); fire("ZONE_CHANGED_NEW_AREA")
+check("open: dungeon with strangers stays", len(last("LeaveParty")) == 0)
+check("open: still no chat", typ("/p hi", "SAY") == "" and filt("CHAT_MSG_PARTY", "hi", "Random Person", lineID=951)[0])
+lua.execute('ROSTER = {}; INSTANCE = { false, "none" }')
+G.KidSafeDB.groupPolicy = "quiet"
+check("1.4.0's 'quiet' reads as open", G.KidSafe.GroupPolicy() == "open")
+G.KidSafeDB.groupPolicy = None
 
 print("FAILURES TOTAL:", fails)
 sys.exit(1 if fails else 0)
