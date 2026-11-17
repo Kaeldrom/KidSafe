@@ -134,6 +134,25 @@ local function IsTrusted(name)
     return n ~= nil and KidSafeDB and KidSafeDB.trusted[n] == true
 end
 
+-- characters on this (shared) account are family too: chars["Gromir-Crypmaghar"] -> "gromir crypmaghar"
+local function IsOwnChar(name)
+    local n = NormName(name)
+    if not n or not KidSafeDB then return false end
+    for key in pairs(KidSafeDB.chars or {}) do
+        if not key:find("^name:") then
+            local k = key:gsub("%-", " "):lower()
+            if k == n then return true end
+        end
+    end
+    return false
+end
+
+-- the only people a protected character can talk to, group with, trade or duel
+local function IsFamily(name)
+    return IsTrusted(name) or IsOwnChar(name)
+end
+KS.IsFamily = IsFamily
+
 local function IsSelf(name, guid)
     if Readable(guid) and guid == UnitGUID("player") then return true end
     local n = NormName(name)
@@ -153,8 +172,35 @@ local function InMyGroup(name, guid)
 end
 
 local function IsKnown(name, guid)
-    return IsSelf(name, guid) or IsTrusted(name) or InMyGroup(name, guid)
+    return IsSelf(name, guid) or IsFamily(name)
 end
+
+-- full name of a unit: "First Surname" on Forever (UnitName's second value is the surname there)
+local function UnitFull(unit)
+    local n, extra = UnitName(unit)
+    if not Readable(n) or not n then return nil end
+    if Readable(extra) and type(extra) == "string" and extra ~= "" then n = n .. " " .. extra end
+    return n
+end
+
+-- everyone in the group who isn't family (unreadable names count as strangers: fail closed)
+local function Strangers()
+    local out = {}
+    local n = GetNumGroupMembers and GetNumGroupMembers() or 0
+    if n <= 0 then return out end
+    local raid = IsInRaid and IsInRaid()
+    for i = 1, (raid and n or n - 1) do
+        local unit = raid and ("raid" .. i) or ("party" .. i)
+        if UnitExists == nil or UnitExists(unit) then
+            if not UnitIsUnit or not UnitIsUnit(unit, "player") then
+                local name = UnitFull(unit)
+                if not name or not IsFamily(name) then out[#out + 1] = { unit = unit, name = name } end
+            end
+        end
+    end
+    return out
+end
+KS.Strangers = Strangers
 
 ---------------------------------------------------------------------------
 -- Word / contact filters (on top of the game's own language filter)
@@ -242,7 +288,7 @@ local FORCED_CVARS = {
     blockTrades              = "1",
     blockChannelInvites      = "1",
     chatBubbles              = "0", -- no speech bubbles from strangers saying things
-    chatBubblesParty         = "1", -- ...but keep group bubbles
+    chatBubblesParty         = "0", -- group bubbles too (they bypass chat filters)
     UnitNamePlayerGuild      = "0", -- guild names over heads can be rude
     UnitNameGuildTitle       = "0",
     violenceLevel            = "0", -- least blood
@@ -305,8 +351,9 @@ local BLOCK_ALWAYS = {
     CHAT_MSG_AFK = "afk-reply", CHAT_MSG_DND = "dnd-reply",
     CHAT_MSG_CHANNEL_JOIN = "channel-notice", CHAT_MSG_CHANNEL_LEAVE = "channel-notice",
     CHAT_MSG_CHANNEL_NOTICE = "channel-notice", CHAT_MSG_CHANNEL_NOTICE_USER = "channel-notice",
+    CHAT_MSG_VOICE_TEXT = "voice-text",
 }
-local QUIET = { ["channel-notice"] = true, ["channel"] = true, ["community"] = true, ["bnet-broadcast"] = true }
+local QUIET = { ["channel-notice"] = true, ["channel"] = true, ["community"] = true, ["bnet-broadcast"] = true, ["voice-text"] = true }
 
 -- Hidden only when they come from strangers
 local BLOCK_STRANGERS = {
@@ -338,7 +385,7 @@ local function FilterAlways(self, event, msg, author, a3, a4, a5, flags, a7, a8,
     if IsStaff(flags) then return false end
     local kind = BLOCK_ALWAYS[event]
     -- Whispers to/from trusted people are fine
-    if (kind == "whisper" or kind == "whisper-out") and IsTrusted(author) then return false end
+    if (kind == "whisper" or kind == "whisper-out") and IsFamily(author) then return false end
     if not FirstTime(lineID) then return true end
     if kind == "whisper" or kind == "bnet-whisper" then
         Log(kind, author, msg)
@@ -356,10 +403,22 @@ local function FilterStrangers(self, event, msg, author, a3, a4, a5, flags, a7, 
     return true
 end
 
+local GROUP_EVENTS = {
+    CHAT_MSG_PARTY = true, CHAT_MSG_PARTY_LEADER = true, CHAT_MSG_RAID = true, CHAT_MSG_RAID_LEADER = true,
+    CHAT_MSG_RAID_WARNING = true, CHAT_MSG_INSTANCE_CHAT = true, CHAT_MSG_INSTANCE_CHAT_LEADER = true,
+}
 local function FilterClean(self, event, msg, author, ...)
-    if not Protected() or not Readable(msg) then return false end
+    if not Protected() then return false end
     local flags = select(4, ...)
-    if IsStaff(flags) or IsSelf(author, select(10, ...)) then return false end
+    if IsStaff(flags) then return false end
+    -- can't tell who wrote it or what it says: hide it (fail closed)
+    if not Readable(msg) or not Readable(author) then return true end
+    if IsSelf(author, select(10, ...)) then return false end
+    -- group chat from anyone who isn't family is hidden, whoever invited them
+    if GROUP_EVENTS[event] and not IsFamily(author) then
+        if FirstTime(select(9, ...)) then Log("group-stranger", author, msg) end
+        return true
+    end
     local hit = ContainsAny(msg, GROOMING)
     if hit then
         if FirstTime(select(9, ...)) then
@@ -442,21 +501,21 @@ handlers.BN_FRIEND_INVITE_ADDED = function()
 end
 
 handlers.DUEL_REQUESTED = function(challenger)
-    if IsTrusted(challenger) then return end
+    if IsFamily(challenger) then return end
     SafeCall(CancelDuel)
     HidePopup("DUEL_REQUESTED")
     Log("duel", challenger, "duel request")
 end
 
 handlers.PET_BATTLE_PVP_DUEL_REQUESTED = function(challenger)
-    if IsTrusted(challenger) then return end
+    if IsFamily(challenger) then return end
     if C_PetBattles and C_PetBattles.CancelPVPDuel then SafeCall(C_PetBattles.CancelPVPDuel) end
     HidePopup("PET_BATTLE_PVP_DUEL_REQUESTED")
     Log("pet-duel", challenger, "pet battle duel request")
 end
 
 handlers.PARTY_INVITE_REQUEST = function(inviter)
-    if IsTrusted(inviter) then return end
+    if IsFamily(inviter) then return end
     SafeCall(DeclineGroup)
     HidePopup("PARTY_INVITE")
     if LFGInvitePopup and LFGInvitePopup:IsShown() then LFGInvitePopup:Hide() end
@@ -469,7 +528,7 @@ handlers.GROUP_INVITE_CONFIRMATION = function()
     local guid = GetNextPendingInviteConfirmation()
     if guid then
         local _, name = GetInviteConfirmationInfo and GetInviteConfirmationInfo(guid)
-        if not IsTrusted(name) then
+        if not IsFamily(name) then
             SafeCall(RespondToInviteConfirmation, guid, false)
             HidePopup("GROUP_INVITE_CONFIRMATION")
             Log("join-request", name, "asked to join the group")
@@ -478,20 +537,174 @@ handlers.GROUP_INVITE_CONFIRMATION = function()
 end
 
 handlers.TRADE_REQUEST = function(name)
-    if IsTrusted(name) then return end
+    if IsFamily(name) then return end
     HidePopup("TRADE")
     SafeCall(CancelTrade)
     Log("trade", name, "trade request")
 end
 
 handlers.TRADE_SHOW = function()
-    local partner = UnitName("NPC")
-    if IsTrusted(partner) then return end
+    local partner = UnitFull("NPC")
+    if IsFamily(partner) then return end
     if not SafeCall(CancelTrade) then SafeCall(CloseTrade) end
     if TradeFrame then TradeFrame:Hide() end
     Log("trade", partner, "trade window")
     Notice("trade", "trading with other players is turned off.", 20)
 end
+
+---------------------------------------------------------------------------
+-- Groups: family only (default). A stranger who gets in - whoever invited them - is removed,
+-- or the kid leaves. A grown-up can allow groups with strangers ("quiet"): chat stays off either way.
+---------------------------------------------------------------------------
+local function GroupPolicy() return KidSafeDB.groupPolicy or "family" end
+KS.GroupPolicy = GroupPolicy
+
+local function Uninvite(name)
+    local fn = (C_PartyInfo and C_PartyInfo.UninviteUnit) or UninviteUnit
+    if fn and name then return SafeCall(fn, name) end
+end
+local function LeaveGroup()
+    local fn = (C_PartyInfo and C_PartyInfo.LeaveParty) or LeaveParty
+    if fn then SafeCall(fn) end
+end
+
+local function EnforceGroup()
+    if not Protected() or GroupPolicy() ~= "family" then return end
+    local list = Strangers()
+    if #list == 0 then return end
+    local lead = UnitIsGroupLeader and UnitIsGroupLeader("player")
+    local instanceGroup = IsInGroup and LE_PARTY_CATEGORY_INSTANCE and IsInGroup(LE_PARTY_CATEGORY_INSTANCE)
+    if lead and not instanceGroup then
+        for _, s in ipairs(list) do
+            if s.name then Uninvite(s.name) end
+            Log("group-removed", s.name or "?", "removed from the group")
+        end
+        if #list > 0 and list[1].name == nil then LeaveGroup() end
+    else
+        Log("group-left", list[1].name or "?", "left a group with people we don't know")
+        LeaveGroup()
+    end
+    Notice("group", "you can only be in a group with family. Ask a grown-up to add a friend.", 10)
+end
+KS.EnforceGroup = EnforceGroup
+
+handlers.GROUP_ROSTER_UPDATE = function() EnforceGroup() end
+handlers.GROUP_JOINED = function() EnforceGroup() end
+
+-- invites sent from menus (right-click, friends list...): cancel them straight away
+local function HookInvites()
+    local function After(name)
+        if not Protected() or GroupPolicy() ~= "family" then return end
+        local n = Readable(name) and name or nil
+        if type(n) == "string" and (UnitExists and UnitExists(n)) then n = UnitFull(n) or n end
+        if not IsFamily(n) then
+            Uninvite(name)
+            Log("invite-out", n or "?", "tried to invite someone we don't know")
+            Notice("invite", "you can only invite family. Ask a grown-up to add a friend.", 8)
+        end
+    end
+    if C_PartyInfo and C_PartyInfo.InviteUnit then hooksecurefunc(C_PartyInfo, "InviteUnit", After) end
+    if InviteUnit then hooksecurefunc("InviteUnit", After) end
+    if C_PartyInfo and C_PartyInfo.RequestInviteFromUnit then
+        hooksecurefunc(C_PartyInfo, "RequestInviteFromUnit", function() C_Timer.After(1, EnforceGroup) end)
+    end
+end
+
+-- Voice chat: never in a voice channel, never heard, never speaking
+local function SilenceVoice()
+    if not Protected() or not C_VoiceChat then return end
+    local v = C_VoiceChat
+    if v.SetMuted then SafeCall(v.SetMuted, true) end
+    if v.SetDeafened then SafeCall(v.SetDeafened, true) end
+    if v.GetActiveChannelID then
+        local ok, id = pcall(v.GetActiveChannelID)
+        if ok and id then
+            if v.DeactivateChannel then SafeCall(v.DeactivateChannel, id) end
+            if v.LeaveChannel then SafeCall(v.LeaveChannel, id) end
+        end
+    end
+end
+KS.SilenceVoice = SilenceVoice
+local function VoiceEvent(...)
+    local v = C_VoiceChat
+    -- the channel id is the first number in these events
+    for i = 1, select("#", ...) do
+        local id = select(i, ...)
+        if type(id) == "number" and v then
+            if v.DeactivateChannel then SafeCall(v.DeactivateChannel, id) end
+            if v.LeaveChannel then SafeCall(v.LeaveChannel, id) end
+            break
+        end
+    end
+    SilenceVoice()
+end
+handlers.VOICE_CHAT_CHANNEL_JOINED = function(status, channelID) VoiceEvent(channelID) end
+handlers.VOICE_CHAT_CHANNEL_ACTIVATED = function(channelID) VoiceEvent(channelID) end
+handlers.VOICE_CHAT_LOGIN = function() SilenceVoice() end
+handlers.VOICE_CHAT_MUTED_CHANGED = function() SilenceVoice() end
+handlers.VOICE_CHAT_DEAFENED_CHANGED = function() SilenceVoice() end
+
+-- Mail: letters only to family; letters from strangers are hidden (items and gold still arrive)
+local function MailGuard()
+    if not Protected() then return end
+    local btn, box = _G.SendMailMailButton, _G.SendMailNameEditBox
+    if not (btn and box) then return end
+    local to = box:GetText()
+    if not Readable(to) or not IsFamily(to) then btn:Disable() end
+end
+KS.MailGuard = MailGuard
+
+local function StrangerLetter(index)
+    if not (index and GetInboxHeaderInfo) then return false end
+    local ok, _, _, sender, _, _, _, _, _, _, _, _, canReply, isGM = pcall(GetInboxHeaderInfo, index)
+    if not ok then return true end
+    if isGM or not canReply then return false end          -- Game Masters, auction house, NPC mail
+    return not (Readable(sender) and IsFamily(sender))
+end
+KS.StrangerLetter = StrangerLetter
+
+local function HideOpenLetter()
+    if not Protected() or not InboxFrame then return end
+    if not StrangerLetter(InboxFrame.openMailID) then return end
+    if OpenMailBodyText and OpenMailBodyText.SetText then
+        OpenMailBodyText:SetText("This letter is from someone you don't know, so KidSafe hid what it says.")
+    end
+    if OpenMailSubject and OpenMailSubject.SetText then OpenMailSubject:SetText("(hidden)") end
+    if OpenMailReplyButton then OpenMailReplyButton:Disable() end
+    Log("mail-hidden", "?", "a letter from someone we don't know")
+end
+local function HideInboxSubjects()
+    if not Protected() or not InboxFrame then return end
+    local per = INBOXITEMS_TO_DISPLAY or 7
+    local page = InboxFrame.pageNum or 1
+    for i = 1, per do
+        local index = (page - 1) * per + i
+        local subj = _G["MailItem" .. i .. "Subject"]
+        if subj and subj.SetText and StrangerLetter(index) then subj:SetText("(hidden)") end
+    end
+end
+
+local mailHooked = false
+local function HookMail()
+    if mailHooked or not _G.SendMailMailButton then return end
+    mailHooked = true
+    for _, fname in ipairs({ "SendMailFrame_Update", "SendMailFrame_EnableSendMailButton", "SendMailFrame_CanSend" }) do
+        if type(_G[fname]) == "function" then hooksecurefunc(fname, MailGuard) end
+    end
+    if SendMailNameEditBox and SendMailNameEditBox.HookScript then
+        SendMailNameEditBox:HookScript("OnTextChanged", MailGuard)
+    end
+    if SendMailFrame and SendMailFrame.HookScript then SendMailFrame:HookScript("OnShow", MailGuard) end
+    if SendMailMailButton.HookScript then
+        SendMailMailButton:HookScript("OnEnable", function() C_Timer.After(0, MailGuard) end)
+    end
+    if type(_G.OpenMail_Update) == "function" then hooksecurefunc("OpenMail_Update", HideOpenLetter) end
+    if OpenMailFrame and OpenMailFrame.HookScript then OpenMailFrame:HookScript("OnShow", HideOpenLetter) end
+    if type(_G.InboxFrame_Update) == "function" then hooksecurefunc("InboxFrame_Update", HideInboxSubjects) end
+end
+KS.HookMail = HookMail
+handlers.MAIL_SHOW = function() HookMail(); MailGuard(); HideInboxSubjects() end
+handlers.MAIL_INBOX_UPDATE = function() HideInboxSubjects() end
 
 -- Always-on bookkeeping events
 handlers.CHANNEL_UI_UPDATE = function() QueueLeave() end
@@ -509,7 +722,7 @@ local BLOCKED_TYPES = {
 }
 local GROUP_TYPES = { PARTY = true, RAID = true, RAID_WARNING = true, INSTANCE_CHAT = true }
 
-local blockedCmds, groupCmds = {}, {}
+local blockedCmds, groupCmds, inviteCmds = {}, {}, {}
 local function AddCmds(set, keys, extra)
     for _, key in ipairs(keys) do
         for i = 1, 12 do
@@ -527,7 +740,8 @@ local function BuildCmdLists()
         { "/s", "/say", "/y", "/yell", "/sh", "/shout", "/w", "/whisper", "/t", "/tell", "/send", "/r", "/reply",
           "/g", "/guild", "/o", "/officer", "/e", "/em", "/me", "/emote", "/c", "/csay", "/join", "/channel",
           "/chan", "/ginvite", "/gquit", "/cinvite", "/chatinvite", "/bn", "/trade",
-          "/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8", "/9", "/10" })
+          "/1", "/2", "/3", "/4", "/5", "/6", "/7", "/8", "/9", "/10", "/voice", "/friend", "/addfriend", "/f" })
+    AddCmds(inviteCmds, { "INVITE", "REQUEST_INVITE", "REQUESTINVITE" }, { "/inv", "/invite", "/rinv", "/requestinvite" })
     AddCmds(groupCmds, { "PARTY", "RAID", "RAID_WARNING", "INSTANCE_CHAT" },
         { "/p", "/party", "/ra", "/raid", "/rw", "/i", "/instance", "/bg" })
 end
@@ -548,7 +762,16 @@ local function GuardEditBox(editBox)
             cmd = cmd:lower()
             if blockedCmds[cmd] then
                 return Wipe(editBox, "cmd", "that kind of chat is turned off.")
+            elseif inviteCmds[cmd] then
+                local who = rest:gsub("^%s+", ""):gsub("%s+$", "")
+                if who == "" then who = UnitFull("target") or "" end
+                if not IsFamily(who) then
+                    return Wipe(editBox, "invite", "you can only invite family. Ask a grown-up to add a friend.")
+                end
             elseif groupCmds[cmd] then
+                if #Strangers() > 0 then
+                    return Wipe(editBox, "groupchat", "chatting with people you don't know is turned off.")
+                end
                 local p = LooksPersonal(rest)
                 if p then return Wipe(editBox, "personal", "please don't share " .. p .. " online! Keep private stuff secret.") end
             end
@@ -560,10 +783,13 @@ local function GuardEditBox(editBox)
     local chatType = editBox:GetAttribute("chatType")
     if chatType == "WHISPER" then
         local target = editBox:GetAttribute("tellTarget")
-        if IsTrusted(target) then chatType = nil end
+        if IsFamily(target) then chatType = nil end
     end
     if chatType and BLOCKED_TYPES[chatType] then
         return Wipe(editBox, "type", BLOCKED_TYPES[chatType] .. " is turned off.")
+    end
+    if chatType and GROUP_TYPES[chatType] and #Strangers() > 0 then
+        return Wipe(editBox, "groupchat", "chatting with people you don't know is turned off.")
     end
     local p = LooksPersonal(text)
     if p then
@@ -573,9 +799,15 @@ end
 
 local hookedBoxes = {}
 local function HookEditBoxes()
-    for i = 1, (NUM_CHAT_WINDOWS or 10) do
-        local eb = _G["ChatFrame" .. i .. "EditBox"]
-        if eb and not hookedBoxes[eb] then
+    local boxes = {}
+    for i = 1, (NUM_CHAT_WINDOWS or 10) do boxes[#boxes + 1] = _G["ChatFrame" .. i .. "EditBox"] end
+    boxes[#boxes + 1] = _G.MacroEditBox
+    if ChatEdit_GetActiveWindow then
+        local ok, active = pcall(ChatEdit_GetActiveWindow)
+        if ok then boxes[#boxes + 1] = active end
+    end
+    for _, eb in ipairs(boxes) do
+        if eb and not hookedBoxes[eb] and eb.HookScript then
             hookedBoxes[eb] = true
             eb:HookScript("OnTextChanged", GuardEditBox)
         end
@@ -598,6 +830,15 @@ local LOCKED_FRAMES = {
     SettingsPanel             = "Options are locked by a grown-up.",
     InterfaceOptionsFrame     = "Options are locked by a grown-up.",
     VideoOptionsFrame         = "Options are locked by a grown-up.",
+    -- other ways to send or read messages
+    MacroFrame                = "making macros is locked. Ask a grown-up!",
+    CalendarFrame             = "the calendar is locked (it shows other players' invites). Ask a grown-up!",
+    AddFriendFrame            = "adding friends is done by a grown-up.",
+    LFGListFrame              = "the group finder is locked (it shows messages from other players).",
+    LFGBrowseFrame            = "the group finder is locked (it shows messages from other players).",
+    LFGListingFrame           = "the group finder is locked (it shows messages from other players).",
+    LFGListApplicationDialog  = "the group finder is locked (it shows messages from other players).",
+    ChannelFrame              = "chat and voice channels are locked.",
     AudioOptionsFrame         = "Options are locked by a grown-up.",
 }
 local hookedFrames = {}
@@ -745,9 +986,11 @@ local function BuildOptionsPage()
         "",
         "  - Private messages (whispers) are blocked",
         "  - Public chat channels (General, Trade, LFG...) are switched off",
-        "  - You only see chat from your group, friends your grown-up added, and Game Masters",
+        "  - You only see chat from family your grown-up added, and Game Masters",
+        "  - You can only be in a group with family, and group chat is family only",
+        "  - Voice chat is off, and letters from people you don't know are hidden",
         "  - Guild invites, friend requests, duels and trades are turned down",
-        "  - Group invites from strangers are turned down (the Dungeon Finder still works)",
+        "  - Group invites from strangers are turned down, and you can only invite family",
         "  - The language filter is always on",
         "  - KidSafe stops you typing private things like phone numbers or where you live",
         "  - You'll get a reminder to take a break",
@@ -773,6 +1016,8 @@ end
 local function EnableProtection()
     ApplyCVars(false)
     LeaveAllChannels()
+    SilenceVoice()
+    EnforceGroup()
 end
 
 -- Bring the game in line with whatever Protected() says now
@@ -983,7 +1228,7 @@ local function Help()
     Print("/kidsafe setpin 1234  - first time only: choose a parent PIN")
     Print("/kidsafe unlock 1234  - parent mode (pauses KidSafe until /kidsafe lock or relog)")
     Print("/kidsafe lock  - turn protection back on")
-    Print("With the PIN unlocked:  trust <name> | untrust <name> | trusted | log [n] | clearlog | break <minutes, 0=off> | newpin <pin> | restore")
+    Print("With the PIN unlocked:  trust <First Surname> | untrust <name> | trusted | groups family|quiet | log [n] | clearlog | break <minutes, 0=off> | newpin <pin> | restore")
     Print("  adult - this is a grown-up's character (KidSafe off) | child - protect this character | chars")
     Print("  lockme - lock this grown-up's character now (needs the PIN to unlock)")
     Print("Or just type /kidsafe on its own for the parent control window.")
@@ -1024,13 +1269,25 @@ SlashCmdList.KIDSAFE = function(input)
         local n = NormName(arg)
         if not n then return Print("usage: /kidsafe trust <character name>") end
         KidSafeDB.trusted[n] = true
-        return Print(arg .. " is trusted now and can whisper, invite, trade and duel.")
+        if not arg:find("%s") then
+            Print("|cffff9933tip:|r on WoW Forever names have a surname, e.g. /kidsafe trust Gromir Crypmaghar - only the full name matches.")
+        end
+        return Print(arg .. " is trusted now and can chat, group, whisper, trade and duel.")
 
     elseif cmd == "untrust" then
         if not NeedParent() then return end
         local n = NormName(arg)
         if n then KidSafeDB.trusted[n] = nil end
         return Print((arg or "?") .. " has been taken off the trusted list.")
+
+    elseif cmd == "groups" then
+        if not NeedParent() then return end
+        if arg == "family" or arg == "quiet" then
+            KidSafeDB.groupPolicy = arg
+            return Print(arg == "family" and "groups: family only (strangers are removed, or the child leaves)."
+                or "groups: strangers allowed (dungeons), but chat with them stays off.")
+        end
+        return Print("usage: /kidsafe groups family | quiet   (now: " .. GroupPolicy() .. ")")
 
     elseif cmd == "trusted" then
         if not NeedParent() then return end
@@ -1114,9 +1371,11 @@ KS:SetScript("OnEvent", function(self, event, ...)
             BuildCmdLists()
             SetupChatFilters()
             ProtectSelf()
+            HookInvites()
             BuildOptionsPage()
         end
         HookAddonList()
+        HookMail()
         return
     elseif event == "PLAYER_LOGIN" then
         -- a parent may have pre-marked this character by name in the panel

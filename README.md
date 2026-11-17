@@ -5,10 +5,14 @@ A World of Warcraft **Forever** addon (interface 16001) that makes the game safe
 ## What it does on a child's character
 - **Blocks private messages** (whispers and Battle.net whispers) in and out. Game Masters and trusted people still get through.
 - **Leaves all public chat channels** (General, Trade, LFG, custom) and declines channel invites.
-- **Hides strangers' /say, /yell and emotes.** The child can only talk to their group (/p, /raid, /instance).
+- **Family only.** The child can only chat with, group with, mail, trade and duel family: the trusted list (full "First Surname" names) plus the characters on this account. Strangers who end up in the group are removed (or the child leaves), and group chat with strangers is off both ways. A grown-up can allow dungeon groups with strangers with `/kidsafe groups quiet`; chat with them stays off.
+- **No voice chat:** muted, deafened, and taken out of any voice channel; voice-to-text is hidden.
+- **Mail:** letters can only be sent to family; letters from strangers show no text (items and gold still arrive).
+- **Macros can't get round it:** macro lines are checked like typed chat, and the macro window is locked.
+- **Hides strangers' /say, /yell and emotes**, even when they're in the group.
 - **Filters group chat:** forces the language filter on, stars out extra swear words, and hides messages that ask for personal info or try to move the child off the game (Discord, Snapchat, "how old are you", links, "free gold"...).
 - **Stops the child typing personal info:** phone numbers, email addresses, "I live...", "my school", passwords.
-- **Declines automatically:** guild invites, guild charters, community invites, friend requests, duels, pet battle duels, group invites from strangers (the Dungeon Finder still works) and trades.
+- **Declines automatically:** guild invites, guild charters, community invites, friend requests, duels, pet battle duels, group invites from strangers and trades. The child can't invite strangers either.
 - **Locks game settings:** language filter, spam filter, block trades, block channel invites, no speech bubbles from strangers, no guild names over heads, less blood. If anything changes them, they're put back.
 - **Locks windows:** Guild & Communities (J), so guild chat can't be read there, and Options/Settings (the Escape menu button is greyed out). Edit Mode still works.
 - **Protects itself:** the in-game AddOns list, `/run`, `/script` and `/console` are locked.

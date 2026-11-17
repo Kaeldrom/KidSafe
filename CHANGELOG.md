@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.0
+- **Fix: a child could invite a stranger and chat with them in /p.** Groups are now family only: the trusted list plus this account's characters. Strangers who get in are removed (or the child leaves); invites to strangers are cancelled, typed or from menus.
+- Group chat is family only both ways, even with a grown-up's permission for dungeon groups (`/kidsafe groups quiet`). Strangers in the group can't be heard in /say or emotes either. Group speech bubbles are off.
+- Unreadable messages or names (secret values) are hidden, not shown.
+- Voice chat: muted, deafened, removed from voice channels; voice-to-text hidden; the channels window is locked.
+- Mail: Send is disabled unless the recipient is family; strangers' letters show no subject or text and can't be replied to.
+- Macros: lines run by macros are checked like typed chat; the macro window is locked.
+- Calendar, group finder listings and Add Friend are locked (other players write text there).
+- Trusted names must be the full "First Surname" so a stranger with the same first name doesn't count.
+- 180 automated checks, including a bypass hunt that fails on 1.3.0.
+
 ## 1.3.0
 - Guild & Communities window (J) is locked on children's characters, so guild chat (live and history) can't be read there.
 - Options/Settings window is locked and the Options button in the Escape menu is greyed out. Edit Mode still works, so UI can be moved around.

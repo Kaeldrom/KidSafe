@@ -18,7 +18,7 @@ wipe = function(t) for k in pairs(t) do t[k]=nil end return t end
 function CopyTable(t) local c={} for k,v in pairs(t) do c[k]=v end return c end
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, m) printed[#printed+1] = m end }
 UIErrorsFrame = { AddMessage = function() end }
-cvars = { profanityFilter="0", blockTrades="0", chatBubbles="1", violenceLevel="2", spamFilter="1", clampme="5" }
+cvars = { profanityFilter="0", blockTrades="0", chatBubbles="1", chatBubblesParty="1", violenceLevel="2", spamFilter="1", clampme="5" }
 C_CVar = { GetCVar=function(n) return cvars[n] end, SetCVar=function(n,v) if n=="violenceLevel" and v=="0" then cvars[n]="1" return end cvars[n]=v end }
 C_Timer = { After=function(_, f) f() end, NewTicker=function(_, f) tickers[#tickers+1]=f end }
 tickers = {}
@@ -84,6 +84,53 @@ function EB:GetAttribute(k) return self.attrs[k] end
 function EB:HookScript(k, fn) self.scripts = self.scripts or {}; self.scripts[k]=fn end
 ChatFrame1EditBox = EB
 function geterrorhandler() return function(e) error(e) end end
+
+-- groups
+ROSTER = {}          -- unit -> { first, surname }
+LEADER = false
+function GetNumGroupMembers() local n = 0; for _ in pairs(ROSTER) do n = n + 1 end; return n > 0 and n + 1 or 0 end
+function IsInRaid() return false end
+function UnitExists(u) return ROSTER[u] ~= nil or u == "player" end
+function UnitIsUnit(a, b) return a == b end
+function UnitIsGroupLeader() return LEADER end
+function IsInGroup() return false end
+C_PartyInfo = { InviteUnit = function(n) calls[#calls+1] = {"Invite", n} end,
+  UninviteUnit = function(n) calls[#calls+1] = {"Uninvite", n} end,
+  LeaveParty = function() calls[#calls+1] = {"LeaveParty"} end }
+function hooksecurefunc(t, k, post)
+  if type(t) == "string" then post = k; k = t; t = _G end
+  local o = t[k]; t[k] = function(...) local r = o and o(...); post(...); return r end
+end
+-- voice
+VOICE = { muted = false, deaf = false, active = 5 }
+C_VoiceChat = { SetMuted = function(v) VOICE.muted = v end, SetDeafened = function(v) VOICE.deaf = v end,
+  GetActiveChannelID = function() return VOICE.active end,
+  DeactivateChannel = function(id) VOICE.active = nil; calls[#calls+1] = {"VoiceOff", id} end,
+  LeaveChannel = function(id) calls[#calls+1] = {"VoiceLeave", id} end }
+-- macros run their lines through this box
+MacroEditBox = { text = "", attrs = {}, scripts = {} }
+setmetatable(MacroEditBox, { __index = EB })
+-- mail
+SendMailMailButton = CreateFrame("Button"); SendMailMailButton.enabled = true
+function SendMailMailButton:Disable() self.enabled = false end
+function SendMailMailButton:Enable() self.enabled = true; if self.scripts.OnEnable then self.scripts.OnEnable(self) end end
+function SendMailMailButton:HookScript(k, fn) self.scripts[k] = fn end
+SendMailNameEditBox = CreateFrame("EditBox")
+function SendMailNameEditBox:HookScript(k, fn) self.scripts[k] = fn end
+function SendMailNameEditBox:SetText(t) self.text = t; if self.scripts.OnTextChanged then self.scripts.OnTextChanged(self) end end
+function SendMailFrame_EnableSendMailButton() SendMailMailButton.enabled = true end
+SendMailFrame = CreateFrame("Frame")
+LETTERS = {}         -- index -> { sender, canReply, isGM }
+function GetInboxHeaderInfo(i) local l = LETTERS[i]; if not l then return end
+  return nil, nil, l[1], "Hello", 0, 0, 30, false, false, false, true, l[2], l[3] end
+InboxFrame = { openMailID = 1, pageNum = 1 }
+INBOXITEMS_TO_DISPLAY = 2
+MailItem1Subject = CreateFrame("FontString"); MailItem2Subject = CreateFrame("FontString")
+function InboxFrame_Update() MailItem1Subject.text = "Hello"; MailItem2Subject.text = "Hello" end
+OpenMailBodyText = CreateFrame("FontString"); OpenMailSubject = CreateFrame("FontString")
+OpenMailReplyButton = CreateFrame("Button"); function OpenMailReplyButton:Disable() self.off = true end
+function OpenMail_Update() OpenMailBodyText.text = "secret letter text"; OpenMailReplyButton.off = false end
+SLASH_INVITE1 = "/invite"
 '''
 lua.execute(MOCK)
 import os
@@ -131,14 +178,19 @@ check("channel blocked", filt("CHAT_MSG_CHANNEL", "WTS stuff", "Seller")[0])
 check("secret whisper blocked", filt("CHAT_MSG_WHISPER", "SECRET", "SECRET", lineID=11)[0])
 check("stranger say hidden", filt("CHAT_MSG_SAY", "hello", "Rando")[0])
 G.group["Buddy"] = True
-check("group say shown", not filt("CHAT_MSG_SAY", "hello", "Buddy", guid="x")[0])
+check("stranger in group: say still hidden", filt("CHAT_MSG_SAY", "hello", "Buddy", guid="x")[0])
+check("stranger in group: party chat hidden", filt("CHAT_MSG_PARTY", "hi kid", "Buddy", lineID=19)[0])
+G.KidSafeDB.trusted["buddy"] = True
+check("family: say shown", not filt("CHAT_MSG_SAY", "hello", "Buddy", guid="x")[0])
 h, m = filt("CHAT_MSG_PARTY", "this boss is shit lol", "Buddy", lineID=20)
 check("party censored", not h and m == "this boss is **** lol")
 check("party grooming hidden", filt("CHAT_MSG_PARTY", "add me on discord", "Buddy", lineID=21)[0])
 check("'instance' not false-positive", not filt("CHAT_MSG_PARTY", "instance reset pls, kick him", "Buddy", lineID=22)[0])
 check("'add melee' not false-positive", not filt("CHAT_MSG_PARTY", "add melee to camp", "Buddy", lineID=23)[0])
 check("url hidden", filt("CHAT_MSG_PARTY", "go to www.free-gold.com", "Buddy", lineID=24)[0])
-check("secret party msg passes", not filt("CHAT_MSG_PARTY", "SECRET", "Buddy", lineID=25)[0])
+check("secret party msg hidden (fail closed)", filt("CHAT_MSG_PARTY", "SECRET", "Buddy", lineID=25)[0])
+check("secret sender hidden (fail closed)", filt("CHAT_MSG_PARTY", "hello", "SECRET", lineID=26)[0])
+G.KidSafeDB.trusted["buddy"] = None
 
 fire("PARTY_INVITE_REQUEST", "Rando")
 check("party invite declined", "DeclineGroup" in calls())
@@ -325,5 +377,153 @@ fresh_login("First"); pew(True, False); api.UnlockAdult("2468")
 G.CommunitiesFrame.Show(G.CommunitiesFrame); G.SettingsPanel.Show(G.SettingsPanel)
 G.GameMenuFrame.Show(G.GameMenuFrame)
 check("unlocked grown-up: guild, options and button work", G.CommunitiesFrame.shown and G.SettingsPanel.shown and G.optBtn.enabled == True)
+
+# =====================================================================================
+# Bypass hunt: every way a protected child could reach, or be reached by, a stranger.
+# The rule: no messages or voice with anyone who isn't family (trusted list + own characters).
+# =====================================================================================
+G.KidSafeDB.chars["Bokor-Realm"] = "child"
+fresh_login("Bokor", 20); pew(True, False)
+lua.execute("""
+  function UnitName(u)
+    if ROSTER[u] then return ROSTER[u][1], ROSTER[u][2] end
+    if u == "NPC" then return tradePartner end
+    if u == "target" then return TARGET and TARGET[1], TARGET and TARGET[2] end
+    return "Bokor"
+  end
+""")
+check("bypass setup: child protected", api.Protected())
+def last(name):
+    return [c for c in G.calls.values() if c[1] == name]
+
+# --- 1. the reported case: invite a random person, then /p
+G.calls = lua.table()
+check("/invite stranger wiped", typ("/invite Random Person", "SAY") == "")
+lua.execute('TARGET = {"Random", "Person"}')
+check("/inv on a stranger target wiped", typ("/inv ", "SAY") == "")
+G.C_PartyInfo.InviteUnit("Random Person")
+check("menu invite to stranger cancelled at once", any(c[2] == "Random Person" for c in last("Uninvite")))
+lua.execute('ROSTER = { party1 = {"Random", "Person"} }; LEADER = true')
+G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+check("stranger who joined anyway is removed (kid leads)", any(c[2] == "Random Person" for c in last("Uninvite")))
+lua.execute('LEADER = false'); G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+check("stranger's group: kid leaves", len(last("LeaveParty")) == 1)
+check("/p with a stranger in the group wiped", typ("/p hello", "SAY") == "")
+check("sticky PARTY chat with a stranger wiped", typ("hello", "PARTY") == "")
+check("/raid, /i and /rw too", typ("/raid hi", "SAY") == "" and typ("/i hi", "SAY") == "" and typ("/rw hi", "SAY") == "")
+check("stranger's party message hidden", filt("CHAT_MSG_PARTY", "hi", "Random Person", lineID=900)[0])
+check("stranger's party leader message hidden", filt("CHAT_MSG_PARTY_LEADER", "hi", "Random Person", lineID=901)[0])
+check("stranger's raid warning hidden", filt("CHAT_MSG_RAID_WARNING", "hi", "Random Person", lineID=902)[0])
+check("stranger's instance chat hidden", filt("CHAT_MSG_INSTANCE_CHAT", "hi", "Random Person", lineID=903)[0])
+check("stranger in group: /say hidden", filt("CHAT_MSG_SAY", "hi", "Random Person", lineID=904)[0])
+check("stranger in group: custom emote hidden", filt("CHAT_MSG_EMOTE", "hugs you", "Random Person", lineID=905)[0])
+check("group bubbles off (they skip chat filters)", G.cvars.chatBubblesParty == "0")
+
+# --- 2. quiet mode (grown-up allows dungeon groups): grouped, but still no chat
+G.KidSafeDB.groupPolicy = "quiet"; G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+check("quiet: stranger may stay", len(last("LeaveParty")) == 0 and len(last("Uninvite")) == 0)
+check("quiet: /p still wiped", typ("/p hi", "SAY") == "")
+check("quiet: stranger's party chat still hidden", filt("CHAT_MSG_PARTY", "hi", "Random Person", lineID=906)[0])
+G.KidSafeDB.groupPolicy = None
+
+# --- 3. family is fine
+G.KidSafeDB.trusted["mum smith"] = True
+lua.execute('ROSTER = { party1 = {"Mum", "Smith"} }')
+G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+check("family in group: stays", len(last("LeaveParty")) == 0 and len(last("Uninvite")) == 0)
+check("family in group: /p works", typ("/p hi mum", "SAY") == "/p hi mum")
+check("family party message shown", not filt("CHAT_MSG_PARTY", "dinner", "Mum Smith", lineID=907)[0])
+check("same first name, different person: still a stranger", filt("CHAT_MSG_PARTY", "hi", "Mum Jones", lineID=908)[0])
+G.KidSafeDB.chars["Gromir-Crypmaghar"] = "adult"
+check("own character: whisper allowed", not filt("CHAT_MSG_WHISPER", "hi", "Gromir Crypmaghar", lineID=910)[0])
+lua.execute('ROSTER = { party1 = {"Mum", "Smith"}, party2 = {"Random", "Person"} }')
+check("family + one stranger: /p wiped", typ("/p hi", "SAY") == "")
+lua.execute('ROSTER = { party1 = {"SECRET", nil} }'); G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+check("unreadable group member treated as stranger", len(last("LeaveParty")) == 1)
+
+# --- 4. macros (run through MacroEditBox, not the chat box)
+MB = G.MacroEditBox
+lua.execute('ROSTER = { party1 = {"Random", "Person"} }')
+for line in ("/s hello", "/w Random hi", "/p hi", "/1 hello", "/invite Random Person", "/e waves", "/g hi"):
+    MB.SetText(MB, line)
+    check("macro line blocked: " + line, MB.text == "")
+MB.SetText(MB, "/cast Frostbolt")
+check("macro /cast untouched", MB.text == "/cast Frostbolt")
+lua.execute('ROSTER = {}')
+lua.execute('MacroFrame = CreateFrame("Frame")'); fire("ADDON_LOADED", "Blizzard_MacroUI")
+G.MacroFrame.Show(G.MacroFrame)
+check("macro window locked", not G.MacroFrame.shown)
+
+# --- 5. every free-text chat type and command
+for ct in ("SAY", "YELL", "EMOTE", "WHISPER", "BN_WHISPER", "CHANNEL", "GUILD", "OFFICER"):
+    check("typing in %s wiped" % ct, typ("hello", ct, "Random") == "")
+for cmd in ("/s", "/y", "/e", "/me", "/w Random", "/r", "/g", "/o", "/1", "/2", "/join x", "/bn x", "/voice x", "/friend Random", "/f Random"):
+    check("command wiped: " + cmd, typ(cmd + " hi", "SAY") == "")
+check("incoming BN whisper hidden", filt("CHAT_MSG_BN_WHISPER", "hi", "Stranger#1", lineID=911)[0])
+check("incoming community chat hidden", filt("CHAT_MSG_COMMUNITIES_CHANNEL", "hi", "Rando", lineID=912)[0])
+check("incoming guild chat hidden", filt("CHAT_MSG_GUILD", "hi", "Rando", lineID=913)[0])
+check("AFK auto-reply hidden", filt("CHAT_MSG_AFK", "brb", "Rando", lineID=914)[0])
+
+# --- 6. voice
+G.calls = lua.table(); G.VOICE.active = 5; G.VOICE.muted = False; G.VOICE.deaf = False
+fire("VOICE_CHAT_LOGIN")
+check("voice: muted and deafened", G.VOICE.muted == True and G.VOICE.deaf == True)
+check("voice: active channel turned off", G.VOICE.active is None)
+G.calls = lua.table(); fire("VOICE_CHAT_CHANNEL_JOINED", 0, 77, 1)
+check("voice: joined channel left straight away", any(c[2] == 77 for c in last("VoiceOff")) and any(c[2] == 77 for c in last("VoiceLeave")))
+G.VOICE.muted = False; fire("VOICE_CHAT_MUTED_CHANGED", False)
+check("voice: unmuting is undone", G.VOICE.muted == True)
+check("voice transcription text hidden", filt("CHAT_MSG_VOICE_TEXT", "hello kid", "Rando", lineID=915)[0])
+lua.execute('ChannelFrame = CreateFrame("Frame")'); fire("ADDON_LOADED", "Blizzard_Channels")
+G.ChannelFrame.Show(G.ChannelFrame)
+check("chat & voice channel window locked", not G.ChannelFrame.shown)
+
+# --- 7. mail
+fire("MAIL_SHOW")
+SB, NB = G.SendMailMailButton, G.SendMailNameEditBox
+NB.SetText(NB, "Random Person"); G.SendMailFrame_EnableSendMailButton()
+check("mail to a stranger: Send disabled", SB.enabled == False)
+SB.Enable(SB)
+check("mail: re-enabled Send gets disabled again", SB.enabled == False)
+NB.SetText(NB, "Gromir Crypmaghar"); SB.enabled = True; G.SendMailFrame_EnableSendMailButton()
+check("mail to own character allowed (Family Mailbox)", SB.enabled == True)
+NB.SetText(NB, "Mum Smith"); SB.enabled = True; G.SendMailFrame_EnableSendMailButton()
+check("mail to trusted family allowed", SB.enabled == True)
+lua.execute('LETTERS = { [1] = {"Random Person", true, false}, [2] = {"Auction House", false, false} }')
+G.InboxFrame_Update()
+check("stranger's letter subject hidden in inbox", G.MailItem1Subject.text == "(hidden)")
+check("auction house mail left alone", G.MailItem2Subject.text == "Hello")
+G.OpenMail_Update()
+check("stranger's letter text hidden", "hid" in G.OpenMailBodyText.text and G.OpenMailReplyButton.off)
+lua.execute('LETTERS = { [1] = {"Mum Smith", true, false} }; InboxFrame.openMailID = 1')
+G.OpenMail_Update()
+check("family letter readable", G.OpenMailBodyText.text == "secret letter text")
+lua.execute('LETTERS = { [1] = {"Gm", true, true} }'); G.OpenMail_Update()
+check("Game Master letter readable", G.OpenMailBodyText.text == "secret letter text")
+
+# --- 8. other places strangers write text
+FR = ("CalendarFrame", "LFGListFrame", "LFGBrowseFrame", "LFGListingFrame", "LFGListApplicationDialog", "AddFriendFrame")
+for fname in FR: lua.execute(fname + ' = CreateFrame("Frame")')
+fire("ADDON_LOADED", "Blizzard_Calendar")
+for fname in FR:
+    f = G[fname]; f.Show(f)
+    check(fname + " locked", not f.shown)
+
+# --- 9. still no way to switch any of it off
+G.hash_SlashCmdList["/run"]("KidSafeDB.groupPolicy='quiet'")
+check("/run still locked", G.KidSafeDB.groupPolicy is None)
+sc("groups quiet")
+check("group setting needs the PIN", G.KidSafeDB.groupPolicy is None)
+sc("trust Random Person")
+check("trusting needs the PIN", G.KidSafeDB.trusted["random person"] is None)
+
+# --- 10. grown-up characters are left alone
+fresh_login("First"); pew(True, False); api.UnlockAdult("2468")
+lua.execute('ROSTER = { party1 = {"Random", "Person"} }; LEADER = false')
+G.calls = lua.table(); fire("GROUP_ROSTER_UPDATE")
+check("unlocked grown-up: groups with strangers untouched", len(last("LeaveParty")) == 0)
+check("unlocked grown-up: /p works", typ("/p hi", "SAY") == "/p hi")
+lua.execute('ROSTER = {}')
+
 print("FAILURES TOTAL:", fails)
 sys.exit(1 if fails else 0)
