@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.5.0
+Fixes from a penetration test, done as the child and as a stranger. `tests/pentest_kidsafe.py` now runs 40 attacks.
+- **Fix: other addons' "run code" commands could switch KidSafe off.** For example, Details!' `/dumpt` runs any Lua after it.
+  - Those commands and windows are locked on a child's character, from the chat box and from macros: Details! `/dumpt`, Run Code and custom displays, WeakAuras, WowLua and similar.
+  - Lua code typed after any command is wiped.
+- **Fix: saved settings could be rewritten or the PIN deleted.**
+  - KidSafe keeps a private copy of its settings. Changes made by anything else are put back within 2 seconds and again before the game saves, and are logged.
+  - The saved file is sealed. If it was changed anyway, every character stays protected until the PIN is entered.
+  - Each character's own saved file remembers the PIN. Deleting the account file no longer lets the set-up wizard run again.
+- **Fix: closing "Who plays this character?" left an old character unprotected.**
+  - Characters nobody has set up are protected until a grown-up answers.
+  - This also covers new characters that start above level 1.
+- **Fix: raid warnings from strangers showed on screen.** The game's big centre-screen text skipped the chat filters. Family's raid warnings still show.
+- **Fix: Deadly Boss Mods showed strangers' timer text and notes.** DBM's own "don't show other players' timers" and "block note sharing" switches are on for children's characters, and handed back for grown-ups.
+- **Fix: `/afk` and `/dnd` messages reached strangers.**
+  - Away messages are off. Plain `/afk` and `/dnd` still work.
+  - Personal info is now checked after any command.
+  - "snap", "insta", "gamertag" and similar words are on the list.
+- **Fix: a `/reload` reset the PIN lock-out.**
+  - Wrong tries are saved.
+  - Three wrong tries lock the PIN for 10 minutes, then 20, then 30 and so on.
+- **Fix: parent mode on a child's character never ended.** It now ends on AFK, or after 15 minutes without using the controls.
+- **Fix: instant declines could give KidSafe away.**
+  - Group, duel, trade and guild invites are answered after a 2-6 second pause.
+  - The question is hidden from the child in the meantime.
+- **Fix: strangers could send gold and items by mail.**
+  - Letters from strangers with gold, items or cash on delivery are sent back unopened.
+  - Their money and item buttons can't be clicked.
+- **Fix: the quest-group idle timer restarted on `/reload`.** The time is saved now.
+- **Fix: a first name on its own matched strangers.**
+  - `/kidsafe trust` needs the full "First Surname".
+  - First names trusted before 1.5.0 no longer count. The parent is told which ones when they unlock.
+- New saved file per character (`KidSafeCharDB`).
+
 ## 1.4.0
 - **Fix: a child could invite a stranger and chat with them in /p.** Messages and voice with anyone who isn't family (trusted list + this account's characters) are now off everywhere, whatever the group.
 - Groups, chosen by a grown-up with `/kidsafe groups`:

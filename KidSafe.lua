@@ -70,17 +70,22 @@ local function CharKey()
     return (name or "?") .. "-" .. realm:gsub("%s", "")
 end
 
+-- Set when KidSafe's saved settings were changed by something other than KidSafe (another addon
+-- running Lua, or the file edited by hand). Every character stays protected until the PIN is entered.
+local tampered = false
+
 local function Protected()
     if parentMode then return false end
+    if tampered then return true end
     if not loggedIn then return true end
     if charRole == "child" then return true end
     if charRole == "adult" then
         if KidSafeDB and KidSafeDB.adultPin == false then return false end
         return not adultUnlocked
     end
-    -- A character nobody has set up yet. On a shared (grown-up's) account it's left alone;
-    -- on a child's own account, or before setup is finished, it's protected.
-    return not (KidSafeDB and KidSafeDB.pinHash and KidSafeDB.newChars == "shared")
+    -- A character nobody has set up yet is protected until a grown-up answers "Who plays this character?"
+    -- (pressing Escape on the question doesn't switch anything off).
+    return true
 end
 
 -- Friendly message to the kid, throttled per key so it never spams
@@ -119,6 +124,113 @@ local function HashPin(pin)
 end
 
 ---------------------------------------------------------------------------
+-- Tamper guard. KidSafeDB is a global table, so any addon that runs Lua (a "run code" box, a debug
+-- command...) could rewrite it. KidSafe keeps its own private copy of everything that matters for
+-- safety, writes it back if the saved table is changed behind its back (checked every couple of
+-- seconds and again just before the game saves on logout or /reload), and seals what it saves.
+-- A broken seal at the next login keeps every character protected until the PIN is entered.
+-- Each character's own saved file remembers the PIN too, so deleting or blanking the account file
+-- doesn't hand the set-up wizard (and a new PIN) to whoever gets there first.
+---------------------------------------------------------------------------
+local CRIT = { "pinHash", "newChars", "adultPin", "lockOnAFK", "groupPolicy", "breakMinutes",
+               "trusted", "chars", "session", "pinFails", "tampered" }
+local DB, CDB, shadow, sealText
+
+local function Ser(v)
+    local t = type(v)
+    if t == "table" then
+        local keys = {}
+        for k in pairs(v) do keys[#keys + 1] = k end
+        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+        local out = {}
+        for i, k in ipairs(keys) do out[i] = Ser(k) .. "=" .. Ser(v[k]) end
+        return "{" .. table.concat(out, ",") .. "}"
+    elseif t == "string" then
+        return string.format("%q", v)
+    end
+    return tostring(v)
+end
+
+local function Deep(v)
+    if type(v) ~= "table" then return v end
+    local c = {}
+    for k, x in pairs(v) do c[k] = Deep(x) end
+    return c
+end
+
+local function CritText(db)
+    local parts = {}
+    for i, k in ipairs(CRIT) do parts[i] = Ser(db[k]) end
+    return table.concat(parts, ";")
+end
+
+local function Checksum(text)
+    local h = 7919
+    local s = "KidSafe-seal#" .. text
+    for i = 1, #s do h = (h * 31 + s:byte(i)) % 4294967291 end
+    return string.format("%08x", h)
+end
+
+-- KidSafe changed its settings itself: remember this as the true state
+local function Seal()
+    if not DB then return end
+    shadow = {}
+    for _, k in ipairs(CRIT) do shadow[k] = Deep(DB[k]) end
+    sealText = CritText(DB)
+    DB.seal = Checksum(sealText)
+    if CDB then
+        CDB.pin = DB.pinHash
+        CDB.sealed = DB.pinHash ~= nil or nil
+    end
+end
+
+-- Something else changed them: put them back
+local function Verify()
+    if not (DB and shadow) then return end
+    if _G.KidSafeDB ~= DB then _G.KidSafeDB = DB end
+    if CDB and _G.KidSafeCharDB ~= CDB then _G.KidSafeCharDB = CDB end
+    local changed = CritText(DB) ~= sealText or DB.seal ~= Checksum(sealText)
+    if changed then
+        for _, k in ipairs(CRIT) do DB[k] = Deep(shadow[k]) end
+        DB.seal = Checksum(sealText)
+        Log("tamper", "?", "KidSafe's settings were changed by something other than KidSafe, and put back")
+    end
+    if CDB and DB.pinHash and (CDB.pin ~= DB.pinHash or not CDB.sealed) then
+        CDB.pin = DB.pinHash; CDB.sealed = true
+    end
+end
+
+-- Every change KidSafe makes goes through this: undo anything done behind its back first, then seal.
+local depth = 0
+local function Guarded(fn)
+    return function(...)
+        if depth == 0 then Verify() end
+        depth = depth + 1
+        local ok, a, b = pcall(fn, ...)
+        depth = depth - 1
+        if depth == 0 then Seal() end
+        if not ok then error(a, 0) end
+        return a, b
+    end
+end
+
+-- At load: was the saved file changed since KidSafe last sealed it?
+local function CheckSeal()
+    if DB.pinHash then
+        if DB.seal then
+            if DB.seal ~= Checksum(CritText(DB)) then return "settings changed" end
+        elseif CDB.sealed then
+            return "seal removed"
+        end
+    elseif CDB.pin then
+        DB.pinHash = CDB.pin          -- the PIN was deleted; this character remembers it
+        return "PIN removed"
+    end
+    if DB.tampered then return DB.tampered end
+    return nil
+end
+
+---------------------------------------------------------------------------
 -- Trusted people (parent, siblings, real-life friends) - managed with the PIN
 ---------------------------------------------------------------------------
 local function NormName(name)
@@ -129,9 +241,21 @@ local function NormName(name)
     return short:lower()
 end
 
+-- Forever names are "First Surname". A first name on its own could be anyone's, so it never counts.
+local function FullName(n) return n ~= nil and n:find("%S%s+%S") ~= nil end
+
 local function IsTrusted(name)
     local n = NormName(name)
-    return n ~= nil and KidSafeDB and KidSafeDB.trusted[n] == true
+    return FullName(n) and KidSafeDB and KidSafeDB.trusted[n] == true
+end
+
+local function BareTrusted()
+    local out = {}
+    for n in pairs(KidSafeDB and KidSafeDB.trusted or {}) do
+        if not FullName(n) then out[#out + 1] = n end
+    end
+    table.sort(out)
+    return out
 end
 
 -- characters on this (shared) account are family too: chars["Gromir-Crypmaghar"] -> "gromir crypmaghar"
@@ -248,7 +372,38 @@ local PERSONAL = {
     "my address", "i live", "i live at", "my house", "my school", "my phone", "my number", "phone number",
     "my password", "password is", "my email", "my e-mail", "my real name", "my mum's", "my mom's",
     "my dad's", "postcode", "zip code", "discord", "snapchat", "instagram", "tiktok", "whatsapp",
+    "snap", "insta", "my ig", "gamertag", "add me on", "friend code", "my username", "telegram", "kik",
 }
+
+-- Text that looks like Lua code. Typed after any slash command except KidSafe's own, it's wiped:
+-- other addons have commands that run whatever follows them (Details!' /dumpt is one).
+local LUA_MARKERS = {
+    "kidsafe", "loadstring", "runscript", "rawset", "rawget",
+    "setmetatable", "getmetatable", "getglobal", "setglobal", "slashcmdlist", "hash_slashcmdlist",
+    "enumerateframes", "unregisterallevents", "unregisterevent", "setscript", "hooksecurefunc",
+    "string.char", "strchar", "getfenv", "setfenv", "pcall", "xpcall", "c_addons", "disableaddon",
+    "sendchatmessage", "bnsendwhisper", "c_chatinfo", "function", "loadaddon", "debugstack",
+}
+-- Commands from other addons that run Lua (locked whatever follows them). Unknown ones are caught
+-- by the markers above and, failing that, by the tamper guard.
+local LUA_CMDS = {
+    "/dumpt", "/lua", "/wowlua", "/dev", "/devtool", "/vdt", "/hack", "/tinypad", "/mtk", "/exec",
+    "/eval", "/luarun", "/runscript", "/run", "/script", "/dump", "/tinspect", "/console", "/print",
+}
+local LUA_FRAMES = {
+    "DetailsRunCodePanel", "DetailsCustomPanel", "WeakAurasOptions", "WowLuaFrame", "MacroToolkitFrame",
+}
+
+local function LooksLikeCode(text)
+    if not Readable(text) then return true end
+    local lower = text:lower()
+    if lower:find("\\%d") then return true end -- "\75\105..." spells names without writing them
+    if lower:find("%f[%w_]_g%s*[%[%.]") then return true end      -- _G["..."] or _G.x
+    for _, w in ipairs(LUA_MARKERS) do
+        if lower:find(w, 1, true) then return true end
+    end
+    return false
+end
 
 -- Turns a phrase into a pattern that only matches whole words ("add me" won't hit "add melee")
 local patternCache = {}
@@ -482,10 +637,54 @@ end
 ---------------------------------------------------------------------------
 local handlers = {}
 
+-- An instant "no" is a give-away (people take a moment to read and click). The question is made
+-- invisible and unclickable straight away, and turned down after a short, uneven pause.
+local concealed = {}
+local function Unconceal(f)
+    if not concealed[f] then return end
+    concealed[f] = nil
+    pcall(f.SetAlpha, f, 1)
+    if f.EnableMouse then pcall(f.EnableMouse, f, true) end
+    if f.GetChildren then
+        for _, c in ipairs({ f:GetChildren() }) do
+            if c.EnableMouse then pcall(c.EnableMouse, c, true) end
+        end
+    end
+end
+local function ConcealFrame(f)
+    if not (f and f.SetAlpha) or concealed[f] then return end
+    concealed[f] = true
+    pcall(f.SetAlpha, f, 0)
+    if f.EnableMouse then pcall(f.EnableMouse, f, false) end
+    if f.GetChildren then
+        for _, c in ipairs({ f:GetChildren() }) do
+            if c.EnableMouse then pcall(c.EnableMouse, c, false) end
+        end
+    end
+    if f.HookScript and not f.ksUnconceal then
+        f.ksUnconceal = true -- pooled pop-ups are reused: always hand them back visible
+        f:HookScript("OnHide", Unconceal)
+    end
+end
+local function Conceal(which)
+    if StaticPopup_FindVisible then
+        local ok, f = pcall(StaticPopup_FindVisible, which)
+        if ok and f then ConcealFrame(f) end
+    end
+end
+local function DeclineLater(which, fn, frame)
+    Conceal(which)
+    if frame then ConcealFrame(frame) end
+    Later(function()
+        SafeCall(fn)
+        HidePopup(which)
+        if frame and frame.Hide then frame:Hide() end
+        if frame then Unconceal(frame) end
+    end)
+end
+
 handlers.GUILD_INVITE_REQUEST = function(inviter, guildName)
-    SafeCall(DeclineGuild)
-    if GuildInviteFrame then GuildInviteFrame:Hide() end
-    HidePopup("GUILD_INVITE")
+    DeclineLater("GUILD_INVITE", DeclineGuild, GuildInviteFrame)
     Log("guild-invite", inviter, guildName)
 end
 
@@ -520,23 +719,20 @@ end
 
 handlers.DUEL_REQUESTED = function(challenger)
     if IsFamily(challenger) then return end
-    SafeCall(CancelDuel)
-    HidePopup("DUEL_REQUESTED")
+    DeclineLater("DUEL_REQUESTED", CancelDuel)
     Log("duel", challenger, "duel request")
 end
 
 handlers.PET_BATTLE_PVP_DUEL_REQUESTED = function(challenger)
     if IsFamily(challenger) then return end
-    if C_PetBattles and C_PetBattles.CancelPVPDuel then SafeCall(C_PetBattles.CancelPVPDuel) end
-    HidePopup("PET_BATTLE_PVP_DUEL_REQUESTED")
+    DeclineLater("PET_BATTLE_PVP_DUEL_REQUESTED", C_PetBattles and C_PetBattles.CancelPVPDuel)
     Log("pet-duel", challenger, "pet battle duel request")
 end
 
 handlers.PARTY_INVITE_REQUEST = function(inviter)
     if IsFamily(inviter) or Policy() ~= "family" then return end
-    SafeCall(DeclineGroup)
-    HidePopup("PARTY_INVITE")
-    if LFGInvitePopup and LFGInvitePopup:IsShown() then LFGInvitePopup:Hide() end
+    local lfg = LFGInvitePopup and LFGInvitePopup:IsShown() and LFGInvitePopup or nil
+    DeclineLater("PARTY_INVITE", DeclineGroup, lfg)
     Log("group-invite", inviter, "group invite")
 end
 
@@ -547,8 +743,7 @@ handlers.GROUP_INVITE_CONFIRMATION = function()
     if guid then
         local _, name = GetInviteConfirmationInfo and GetInviteConfirmationInfo(guid)
         if not IsFamily(name) and Policy() == "family" then
-            SafeCall(RespondToInviteConfirmation, guid, false)
-            HidePopup("GROUP_INVITE_CONFIRMATION")
+            DeclineLater("GROUP_INVITE_CONFIRMATION", function() RespondToInviteConfirmation(guid, false) end)
             Log("join-request", name, "asked to join the group")
         end
     end
@@ -556,16 +751,14 @@ end
 
 handlers.TRADE_REQUEST = function(name)
     if IsFamily(name) then return end
-    HidePopup("TRADE")
-    SafeCall(CancelTrade)
+    DeclineLater("TRADE", CancelTrade)
     Log("trade", name, "trade request")
 end
 
 handlers.TRADE_SHOW = function()
     local partner = UnitFull("NPC")
     if IsFamily(partner) then return end
-    if not SafeCall(CancelTrade) then SafeCall(CloseTrade) end
-    if TradeFrame then TradeFrame:Hide() end
+    DeclineLater("TRADE", function() if not SafeCall(CancelTrade) then SafeCall(CloseTrade) end end, TradeFrame)
     Log("trade", partner, "trade window")
     Notice("trade", "trading with other players is turned off.", 20)
 end
@@ -578,8 +771,12 @@ local GroupPolicy = Policy
 KS.GroupPolicy = GroupPolicy
 
 -- quest groups: when did the kid last make progress on a quest?
+-- (saved, in real-world seconds, so a /reload or relog doesn't restart the clock)
 local lastProgress = 0
-local function Progress() lastProgress = GetTime() end
+local function Progress()
+    lastProgress = time()
+    if KidSafeDB then KidSafeDB.lastProgress = lastProgress end
+end
 KS.IDLE_LEAVE = 20 * 60
 
 local function Uninvite(name)
@@ -614,7 +811,8 @@ local function QuestGroupCheck(list)
     if inInstance and kind ~= "none" then
         return LeaveLater("left a " .. tostring(kind) .. " group with people we don't know", list[1].name)
     end
-    if lastProgress > 0 and GetTime() - lastProgress > KS.IDLE_LEAVE then
+    if lastProgress <= 0 then Progress() end -- in a group nobody has timed yet: start the clock now
+    if time() - lastProgress > KS.IDLE_LEAVE then
         return LeaveLater("left a group after a long time with no quest progress", list[1].name)
     end
 end
@@ -725,9 +923,42 @@ local function StrangerLetter(index)
 end
 KS.StrangerLetter = StrangerLetter
 
+-- Gold, items or cash-on-delivery from a stranger go straight back, unopened (gifts are a grooming trick,
+-- and COD letters charge the child). One letter per inbox update: the indexes move after each return.
+local function ReturnStrangerGifts()
+    if not Protected() or not (GetInboxNumItems and GetInboxHeaderInfo and ReturnInboxItem) then return end
+    local ok, count = pcall(GetInboxNumItems)
+    if not ok or type(count) ~= "number" then return end
+    for i = count, 1, -1 do
+        local got, _, _, sender, _, money, cod, _, itemCount, _, wasReturned = pcall(GetInboxHeaderInfo, i)
+        if got and not wasReturned and StrangerLetter(i)
+            and ((tonumber(money) or 0) > 0 or (tonumber(cod) or 0) > 0 or (tonumber(itemCount) or 0) > 0) then
+            if SafeCall(ReturnInboxItem, i) then
+                Log("mail-returned", sender, "a letter with gold or items from someone we don't know was sent back")
+            end
+            return
+        end
+    end
+end
+KS.ReturnStrangerGifts = ReturnStrangerGifts
+
+-- the money and attachment buttons of the open letter (handed back working for family letters)
+local takeOff = {}
+local function TakeButtons(on)
+    local list = { _G.OpenMailMoneyButton, _G.OpenMailLetterButton }
+    for i = 1, (ATTACHMENTS_MAX_RECEIVE or 16) do list[#list + 1] = _G["OpenMailAttachmentButton" .. i] end
+    for _, b in pairs(list) do
+        if b and b.EnableMouse then
+            if not on then pcall(b.EnableMouse, b, false); takeOff[b] = true
+            elseif takeOff[b] then pcall(b.EnableMouse, b, true); takeOff[b] = nil end
+        end
+    end
+end
+
 local function HideOpenLetter()
     if not Protected() or not InboxFrame then return end
-    if not StrangerLetter(InboxFrame.openMailID) then return end
+    if not StrangerLetter(InboxFrame.openMailID) then return TakeButtons(true) end
+    TakeButtons(false)
     if OpenMailBodyText and OpenMailBodyText.SetText then
         OpenMailBodyText:SetText("This letter is from someone you don't know, so KidSafe hid what it says.")
     end
@@ -765,8 +996,8 @@ local function HookMail()
     if type(_G.InboxFrame_Update) == "function" then hooksecurefunc("InboxFrame_Update", HideInboxSubjects) end
 end
 KS.HookMail = HookMail
-handlers.MAIL_SHOW = function() HookMail(); MailGuard(); HideInboxSubjects() end
-handlers.MAIL_INBOX_UPDATE = function() HideInboxSubjects() end
+handlers.MAIL_SHOW = function() HookMail(); MailGuard(); HideInboxSubjects(); ReturnStrangerGifts() end
+handlers.MAIL_INBOX_UPDATE = function() HideInboxSubjects(); ReturnStrangerGifts() end
 
 -- Always-on bookkeeping events
 handlers.CHANNEL_UI_UPDATE = function() QueueLeave() end
@@ -784,7 +1015,7 @@ local BLOCKED_TYPES = {
 }
 local GROUP_TYPES = { PARTY = true, RAID = true, RAID_WARNING = true, INSTANCE_CHAT = true }
 
-local blockedCmds, groupCmds, inviteCmds = {}, {}, {}
+local blockedCmds, groupCmds, inviteCmds, awayCmds, luaCmds, ownCmds = {}, {}, {}, {}, {}, {}
 local function AddCmds(set, keys, extra)
     for _, key in ipairs(keys) do
         for i = 1, 12 do
@@ -806,6 +1037,10 @@ local function BuildCmdLists()
     AddCmds(inviteCmds, { "INVITE", "REQUEST_INVITE", "REQUESTINVITE" }, { "/inv", "/invite", "/rinv", "/requestinvite" })
     AddCmds(groupCmds, { "PARTY", "RAID", "RAID_WARNING", "INSTANCE_CHAT" },
         { "/p", "/party", "/ra", "/raid", "/rw", "/i", "/instance", "/bg" })
+    -- an away message is sent automatically to everyone who whispers: plain /afk and /dnd only
+    AddCmds(awayCmds, { "AFK", "DND" }, { "/afk", "/away", "/dnd", "/busy" })
+    AddCmds(luaCmds, { "SCRIPT", "CONSOLE", "DUMP", "TABLEINSPECT", "DUMPTABLE" }, LUA_CMDS)
+    AddCmds(ownCmds, { "KIDSAFE" }, { "/kidsafe", "/ks" })
 end
 
 local function Wipe(editBox, key, msg)
@@ -822,8 +1057,13 @@ local function GuardEditBox(editBox)
         local cmd, rest = text:match("^(/%S+)%s(.*)$")
         if cmd then
             cmd = cmd:lower()
+            if ownCmds[cmd] then return end
             if blockedCmds[cmd] then
                 return Wipe(editBox, "cmd", "that kind of chat is turned off.")
+            elseif luaCmds[cmd] or LooksLikeCode(rest) then
+                return Wipe(editBox, "slash", "that command is locked. Ask a grown-up!")
+            elseif awayCmds[cmd] and rest:find("%S") then
+                return Wipe(editBox, "away", "away messages are turned off - just type " .. cmd .. " on its own.")
             elseif inviteCmds[cmd] and Policy() == "family" then
                 local who = rest:gsub("^%s+", ""):gsub("%s+$", "")
                 if who == "" then who = UnitFull("target") or "" end
@@ -834,9 +1074,10 @@ local function GuardEditBox(editBox)
                 if #Strangers() > 0 then
                     return Wipe(editBox, "groupchat", "chatting with people you don't know is turned off.")
                 end
-                local p = LooksPersonal(rest)
-                if p then return Wipe(editBox, "personal", "please don't share " .. p .. " online! Keep private stuff secret.") end
             end
+            -- whatever the command, never personal info
+            local p = LooksPersonal(rest)
+            if p then return Wipe(editBox, "personal", "please don't share " .. p .. " online! Keep private stuff secret.") end
         end
         return
     end
@@ -911,6 +1152,10 @@ local QUEUE_FRAMES = {
 for name in pairs(QUEUE_FRAMES) do
     LOCKED_FRAMES[name] = "dungeon and battleground queues are locked. Ask a grown-up!"
 end
+-- other addons' windows that run Lua code (Details! "Run Code" and custom displays, WeakAuras, WowLua...)
+for _, name in ipairs(LUA_FRAMES) do
+    LOCKED_FRAMES[name] = "that window is locked. Ask a grown-up!"
+end
 local hookedFrames = {}
 
 local function CloseLocked(frame, msg)
@@ -980,9 +1225,11 @@ local function HookAddonList()
     HookGameMenu()
 end
 
+local lockedSlash = {}
 local function LockSlash(key)
     if not SlashCmdList or type(SlashCmdList[key]) ~= "function" then return end
     local original = SlashCmdList[key]
+    if lockedSlash[original] then return end
     local locked = function(...)
         if Protected() then
             Notice("slash", "that command is locked. Ask a grown-up!", 5)
@@ -990,6 +1237,7 @@ local function LockSlash(key)
         end
         return original(...)
     end
+    lockedSlash[locked] = true
     SlashCmdList[key] = locked
     -- the chat box caches handlers by command text; swap any cached copy too
     if type(hash_SlashCmdList) == "table" then
@@ -1013,6 +1261,24 @@ local function ProtectSelf()
         end)
     end
     for _, key in ipairs({ "SCRIPT", "CONSOLE", "DUMP", "TABLEINSPECT" }) do LockSlash(key) end
+end
+
+-- Any addon's slash command that is spelled like a known "run Lua" command is locked too, also when a
+-- macro runs it (macros don't go through the chat box). Re-run as each addon loads.
+local luaCmdSet = {}
+for _, c in ipairs(LUA_CMDS) do luaCmdSet[c] = true end
+local function LockLuaSlashes()
+    if type(SlashCmdList) ~= "table" then return end
+    local keys = {}
+    for key in pairs(SlashCmdList) do keys[#keys + 1] = key end
+    for _, key in ipairs(keys) do
+        if key ~= "KIDSAFE" then
+            for i = 1, 12 do
+                local s = _G["SLASH_" .. key .. i]
+                if type(s) == "string" and luaCmdSet[s:lower()] then LockSlash(key); break end
+            end
+        end
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -1083,6 +1349,62 @@ local function BuildOptionsPage()
 end
 
 ---------------------------------------------------------------------------
+-- Text other players can put on screen without the chat window
+---------------------------------------------------------------------------
+-- Raid warnings: Blizzard's big centre-screen text listens to CHAT_MSG_RAID_WARNING itself, so chat
+-- filters don't reach it. While protected the frame stops listening, and KidSafe shows family's
+-- (and Game Masters') warnings itself, cleaned like group chat.
+local rwOff = false
+local function GuardRaidWarnings()
+    local f = _G.RaidWarningFrame
+    if not (f and f.UnregisterEvent and f.RegisterEvent) then return end
+    if Protected() then
+        if not rwOff and (not f.IsEventRegistered or f:IsEventRegistered("CHAT_MSG_RAID_WARNING")) then
+            pcall(f.UnregisterEvent, f, "CHAT_MSG_RAID_WARNING")
+            rwOff = true
+        end
+    elseif rwOff then
+        pcall(f.RegisterEvent, f, "CHAT_MSG_RAID_WARNING")
+        rwOff = false
+    end
+end
+KS.GuardRaidWarnings = GuardRaidWarnings
+
+handlers.CHAT_MSG_RAID_WARNING = function(msg, author, _, _, _, flags)
+    if not rwOff then return end
+    if not (Readable(msg) and Readable(author)) then return end
+    if not (IsStaff(flags) or IsSelf(author) or IsFamily(author)) then return end
+    if ContainsAny(msg, GROOMING) then return end
+    local text = Censor(msg)
+    if RaidNotice_AddMessage and RaidWarningFrame then
+        local info = ChatTypeInfo and ChatTypeInfo.RAID_WARNING or { r = 1, g = 0.28, b = 0 }
+        RaidNotice_AddMessage(RaidWarningFrame, text, info)
+    end
+    if PlaySound and SOUNDKIT and SOUNDKIT.RAID_WARNING then PlaySound(SOUNDKIT.RAID_WARNING) end
+end
+
+-- Deadly Boss Mods: group leaders and assistants can send timer bars with their own text, and notes.
+-- DBM has its own switches for both; they're turned on while protected and put back for grown-ups.
+local DBM_SAFE = { "DontShowUserTimers", "BlockNoteShare" }
+local function GuardDBM()
+    local o = type(DBM) == "table" and type(DBM.Options) == "table" and DBM.Options or nil
+    if not o or not KidSafeDB then return end
+    KidSafeDB.origDBM = KidSafeDB.origDBM or {}
+    if Protected() then
+        for _, k in ipairs(DBM_SAFE) do
+            if o[k] ~= true then
+                if KidSafeDB.origDBM[k] == nil then KidSafeDB.origDBM[k] = o[k] and true or false end
+                o[k] = true
+            end
+        end
+    elseif not parentMode and next(KidSafeDB.origDBM) then
+        for k, v in pairs(KidSafeDB.origDBM) do o[k] = v end
+        KidSafeDB.origDBM = {}
+    end
+end
+KS.GuardDBM = GuardDBM
+
+---------------------------------------------------------------------------
 -- Turn protections on/off (parent mode)
 ---------------------------------------------------------------------------
 local function EnableProtection()
@@ -1090,15 +1412,21 @@ local function EnableProtection()
     LeaveAllChannels()
     SilenceVoice()
     EnforceGroup()
+    GuardRaidWarnings()
+    GuardDBM()
 end
 
 -- Bring the game in line with whatever Protected() says now
 local function Refresh()
     if Protected() then
         EnableProtection()
-    elseif not parentMode and next(KidSafeDB.origCVars or {}) then
-        -- a grown-up's character gets their own settings back
-        RestoreCVars()
+    else
+        if not parentMode and next(KidSafeDB.origCVars or {}) then
+            -- a grown-up's character gets their own settings back
+            RestoreCVars()
+        end
+        GuardRaidWarnings()
+        GuardDBM()
     end
     if KS.OnStateChanged then KS.OnStateChanged() end
 end
@@ -1119,24 +1447,53 @@ local function ValidPin(pin)
 end
 api.ValidPin = ValidPin
 
+-- Parent mode ends by itself: when the game marks you AFK, or after this long without using the controls
+KS.PARENT_TIMEOUT = 15 * 60
+local parentSeen = 0
+local function ParentActive() parentSeen = GetTime() end
+
 -- returns ok, message
+-- Wrong tries are saved (in real-world time), so a /reload or relog doesn't reset the count:
+-- 3 wrong tries lock it for 10 minutes, then 20, 30... until the right PIN is entered.
 function api.Unlock(pin)
     if not KidSafeDB.pinHash then return false, "No PIN has been set yet." end
-    if KS.pinLockUntil and GetTime() < KS.pinLockUntil then
+    local fails = KidSafeDB.pinFails or {}
+    if fails.lockUntil and time() < fails.lockUntil then
         return false, "Too many wrong tries - wait a few minutes."
     end
-    if HashPin(pin) ~= KidSafeDB.pinHash then
-        KS.badPins = (KS.badPins or 0) + 1
-        Log("wrong-pin", UnitName("player"), "a wrong PIN was entered")
-        if KS.badPins >= 3 then
-            KS.badPins = 0
-            KS.pinLockUntil = GetTime() + 600
-            return false, "Wrong PIN. Locked for 10 minutes."
+    -- if the saved settings were tampered with, only the PIN this character remembers counts
+    local want = (tampered and CDB and CDB.pin) or KidSafeDB.pinHash
+    if HashPin(pin) ~= want then
+        local n = (fails.n or 0) + 1
+        local lockouts = fails.lockouts or 0
+        local msg = "Wrong PIN."
+        local lockUntil
+        if n >= 3 then
+            n = 0
+            lockouts = lockouts + 1
+            lockUntil = time() + 600 * lockouts
+            msg = "Wrong PIN. Locked for " .. (10 * lockouts) .. " minutes."
         end
-        return false, "Wrong PIN."
+        KidSafeDB.pinFails = { n = n, lockouts = lockouts, lockUntil = lockUntil }
+        Log("wrong-pin", UnitName("player"), "a wrong PIN was entered")
+        return false, msg
     end
-    KS.badPins = 0
+    KidSafeDB.pinFails = nil
     parentMode = true
+    ParentActive()
+    if tampered then
+        tampered = false
+        KidSafeDB.tampered = nil
+        KidSafeDB.pinHash = want
+        Print("|cffff9933KidSafe's saved settings were changed by something other than KidSafe|r (another addon, "
+            .. "or the file edited by hand), so every character stayed protected. Please check the characters and "
+            .. "trusted people in /kidsafe. Details are in the log.")
+    end
+    local bare = BareTrusted()
+    if #bare > 0 then
+        Print("|cffff9933these trusted names have no surname, so they don't count any more:|r " .. table.concat(bare, ", ")
+            .. ". Add them again with their full name, e.g. /kidsafe trust Mum Smith.")
+    end
     if charRole == "adult" then api.MarkAdultUnlocked() end
     Refresh()
     return true
@@ -1236,6 +1593,9 @@ function api.Trust(name, on)
     if not parentMode then return false, "Unlock first." end
     local n = NormName(name)
     if not n then return false, "Type a character name." end
+    if on and not FullName(n) then
+        return false, "Type the full name, first name and surname (e.g. Mum Smith): a first name on its own could be anyone."
+    end
     KidSafeDB.trusted[n] = on and true or nil
     return true
 end
@@ -1292,6 +1652,18 @@ function api.CompleteSetup(pin, role, newChars)
     return true
 end
 
+-- every change goes through the tamper guard; using the controls keeps parent mode awake
+for _, k in ipairs({ "Unlock", "MarkAdultUnlocked", "UnlockAdult", "LockCharacter", "SetAdultPin", "SetLockOnAFK",
+    "Lock", "SetPin", "SetRole", "ClaimAdult", "SetNewChars", "SetBreak", "Trust", "ProtectByName", "ForgetChar",
+    "ClearLog", "Restore", "CompleteSetup" }) do
+    local fn = api[k]
+    api[k] = Guarded(function(...)
+        local a, b = fn(...)
+        if parentMode then ParentActive() end
+        return a, b
+    end)
+end
+
 ---------------------------------------------------------------------------
 -- /kidsafe (parent controls)
 ---------------------------------------------------------------------------
@@ -1314,7 +1686,8 @@ end
 
 SLASH_KIDSAFE1 = "/kidsafe"
 SLASH_KIDSAFE2 = "/ks"
-SlashCmdList.KIDSAFE = function(input)
+SlashCmdList.KIDSAFE = Guarded(function(input)
+    if parentMode then ParentActive() end
     local cmd, arg = (input or ""):match("^%s*(%S*)%s*(.-)%s*$")
     cmd = (cmd or ""):lower()
 
@@ -1339,11 +1712,11 @@ SlashCmdList.KIDSAFE = function(input)
     elseif cmd == "trust" then
         if not NeedParent() then return end
         local n = NormName(arg)
-        if not n then return Print("usage: /kidsafe trust <character name>") end
-        KidSafeDB.trusted[n] = true
-        if not arg:find("%s") then
-            Print("|cffff9933tip:|r on WoW Forever names have a surname, e.g. /kidsafe trust Gromir Crypmaghar - only the full name matches.")
+        if not n then return Print("usage: /kidsafe trust <First Surname>") end
+        if not FullName(n) then
+            return Print("|cffff9933type the full name|r, first name and surname, e.g. /kidsafe trust Gromir Crypmaghar - a first name on its own could be anyone.")
         end
+        KidSafeDB.trusted[n] = true
         return Print(arg .. " is trusted now and can chat, group, whisper, trade and duel.")
 
     elseif cmd == "untrust" then
@@ -1413,7 +1786,7 @@ SlashCmdList.KIDSAFE = function(input)
     elseif cmd == "chars" then
         if not NeedParent() then return end
         for _, c in ipairs(api.CharList()) do Print(c.name .. " - " .. c.role) end
-        return Print("other characters: " .. (api.GetNewChars() == "shared" and "left alone (new level 1 characters protected)" or "protected"))
+        return Print("other characters: " .. (api.GetNewChars() == "shared" and "protected until someone answers who plays them (new level 1 characters are set to child)" or "protected"))
 
     elseif cmd == "restore" then
         if not NeedParent() then return end
@@ -1423,7 +1796,7 @@ SlashCmdList.KIDSAFE = function(input)
 
     if cmd == "" and KS.OpenPanel then return KS.OpenPanel() end
     Help()
-end
+end)
 
 ---------------------------------------------------------------------------
 -- Events
@@ -1437,7 +1810,11 @@ KS:SetScript("OnEvent", function(self, event, ...)
     if event == "ADDON_LOADED" then
         local name = ...
         if name == ADDON then
-            KidSafeDB = KidSafeDB or {}
+            KidSafeDB = type(KidSafeDB) == "table" and KidSafeDB or {}
+            KidSafeCharDB = type(KidSafeCharDB) == "table" and KidSafeCharDB or {}
+            DB, CDB = KidSafeDB, KidSafeCharDB
+            -- before anything is filled in: is the saved file the one KidSafe sealed?
+            local why = CheckSeal()
             KidSafeDB.trusted = KidSafeDB.trusted or {}
             KidSafeDB.log = KidSafeDB.log or {}
             KidSafeDB.chars = KidSafeDB.chars or {}
@@ -1445,6 +1822,14 @@ KS:SetScript("OnEvent", function(self, event, ...)
             KidSafeDB.exempt = nil
             KidSafeDB.origCVars = KidSafeDB.origCVars or {}
             if KidSafeDB.breakMinutes == nil then KidSafeDB.breakMinutes = 60 end
+            lastProgress = tonumber(KidSafeDB.lastProgress) or 0
+            if why then
+                tampered = true
+                KidSafeDB.tampered = why
+                Log("tamper", "?", "KidSafe's saved settings were changed outside KidSafe (" .. why .. "): "
+                    .. "every character stays protected until the PIN is entered")
+            end
+            Seal()
             BuildCmdLists()
             SetupChatFilters()
             ProtectSelf()
@@ -1453,6 +1838,7 @@ KS:SetScript("OnEvent", function(self, event, ...)
         end
         HookAddonList()
         HookMail()
+        LockLuaSlashes()
         return
     elseif event == "PLAYER_LOGIN" then
         -- a parent may have pre-marked this character by name in the panel
@@ -1474,11 +1860,25 @@ KS:SetScript("OnEvent", function(self, event, ...)
         loggedIn = true
         HookEditBoxes()
         HookAddonList()
+        LockLuaSlashes()
+        Seal()
         C_Timer.NewTicker(60, BreakTick)
         C_Timer.NewTicker(60, function()
-            if adultUnlocked and KidSafeDB.session then KidSafeDB.session.t = time() end
+            if adultUnlocked and KidSafeDB.session then
+                Verify(); KidSafeDB.session.t = time(); Seal()
+            end
         end)
-        C_Timer.NewTicker(30, function() if Protected() then ApplyCVars(false) end end)
+        C_Timer.NewTicker(30, function()
+            if Protected() then ApplyCVars(false); GuardRaidWarnings(); GuardDBM() end
+            -- parent mode doesn't stay on if the grown-up forgets it
+            if parentMode and GetTime() - parentSeen > KS.PARENT_TIMEOUT then
+                api.Lock()
+                if KS.HidePanel then KS.HidePanel() end
+                Print("|cffff9933parent mode ended|r (15 minutes without using the controls). Protection is back on.")
+            end
+        end)
+        C_Timer.NewTicker(2, Verify)
+        C_Timer.NewTicker(0.5, HookLockedFrames) -- windows other addons create later (e.g. Details! Run Code)
         Refresh()
         if charRole == "adult" and Protected() then
             Print("|cffff9933this is a grown-up's character - KidSafe stays on until the PIN is entered.|r")
@@ -1503,8 +1903,8 @@ KS:SetScript("OnEvent", function(self, event, ...)
             and time() - (sess.t or 0) < RELOAD_GRACE then
             adultUnlocked = true          -- just a /reload by the grown-up
             Refresh()
-        elseif isInitialLogin then
-            KidSafeDB.session = nil       -- a real login always asks for the PIN
+        elseif isInitialLogin and KidSafeDB.session then
+            Verify(); KidSafeDB.session = nil; Seal()   -- a real login always asks for the PIN
         end
         HookEditBoxes()
         if Protected() then EnableProtection() end
@@ -1517,9 +1917,15 @@ KS:SetScript("OnEvent", function(self, event, ...)
             api.LockCharacter()
             Print("|cffff9933locked because you went AFK.|r Enter the PIN to unlock.")
             if KS.ShowFirstRun then KS.ShowFirstRun("adultlock") end
+        elseif unit == "player" and parentMode and UnitIsAFK and UnitIsAFK("player") then
+            -- parent mode on a child's character ends when the grown-up walks away
+            api.Lock()
+            if KS.HidePanel then KS.HidePanel() end
+            Print("|cffff9933parent mode ended because you went AFK.|r Protection is back on.")
         end
         return
     elseif event == "PLAYER_LOGOUT" then
+        Verify()   -- the game saves straight after this: never save settings changed behind KidSafe's back
         if C_AddOns and C_AddOns.EnableAddOn then pcall(C_AddOns.EnableAddOn, ADDON, UnitName("player")) end
         return
     end
@@ -1536,3 +1942,10 @@ for _, ev in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "
     TryRegister(ev)
 end
 for ev in pairs(handlers) do TryRegister(ev) end
+
+-- a second, nameless watcher for logout, in case the main frame's events are switched off by other code
+do
+    local guard = CreateFrame("Frame")
+    if guard.RegisterEvent then pcall(guard.RegisterEvent, guard, "PLAYER_LOGOUT") end
+    guard:SetScript("OnEvent", function() Verify() end)
+end

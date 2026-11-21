@@ -101,7 +101,7 @@ local function RoleText(role, protected)
         if protected then return ORANGE .. "a grown-up's character - LOCKED until the PIN is entered|r" end
         return ORANGE .. "a grown-up's character - KidSafe is off|r"
     end
-    return (protected and GREEN .. "not set up yet - protected for now|r" or GREY .. "not set up yet - KidSafe is off for now|r")
+    return GREEN .. "not set up yet - protected until a grown-up says who plays it|r"
 end
 
 local function ShortName()
@@ -145,7 +145,7 @@ do
     h3:SetText("3.  Whose account is this?")
     setup.mode = Choice(setup, {
         { value = "shared", text = "Mine - my child plays some characters on it.\n" .. GREY ..
-            "Each character asks once who plays it. Brand-new level 1 characters are protected straight away.|r", width = 420 },
+            "Each character is protected until you answer once who plays it. Brand-new level 1 characters are set to your child's straight away.|r", width = 420 },
         { value = "protect", text = "My child's own account.\n" .. GREY ..
             "Every character is protected unless you unlock it with the PIN.|r", width = 420 },
     })
@@ -221,9 +221,7 @@ do
 
     ask:SetScript("OnShow", function()
         ask.q:SetText("Who plays " .. (ShortName() or "this character") .. "?")
-        ask.sub:SetText(api.Protected()
-            and "KidSafe is protecting this character until a grown-up says otherwise."
-            or "KidSafe is off on this character for now.")
+        ask.sub:SetText("KidSafe is protecting this character until a grown-up says otherwise.")
         ask.err:SetText("")
     end)
 end
@@ -334,8 +332,8 @@ do
     end)
     pb:SetPoint("LEFT", unlocked.protName, "RIGHT", 6, 0)
     unlocked.mode = Choice(unlocked, {
-        { value = "shared", text = "Characters not set up yet: left alone (new level 1 characters protected)", width = 440 },
-        { value = "protect", text = "Characters not set up yet: protected", width = 440 },
+        { value = "shared", text = "Characters not set up yet: ask who plays them (protected until answered; new level 1 = child)", width = 440 },
+        { value = "protect", text = "Characters not set up yet: protected (a child's own account)", width = 440 },
     }, function(v) api.SetNewChars(v); KS.OnStateChanged() end)
     unlocked.mode.buttons[1]:SetPoint("TOPLEFT", pl, "BOTTOMLEFT", -4, -8)
     unlocked.mode.buttons[2]:SetPoint("TOPLEFT", unlocked.mode.buttons[1], "BOTTOMLEFT", 0, 2)
@@ -488,6 +486,8 @@ end
 ---------------------------------------------------------------------------
 -- Entry points
 ---------------------------------------------------------------------------
+function KS.HidePanel() if panel:IsShown() then panel:Hide() end end
+
 function KS.OpenPanel()
     if not api.HasPin() then return setup:Show() end
     if InCombatLockdown and InCombatLockdown() then

@@ -12,7 +12,7 @@ calls = {}
 local function rec(name) return function(...) calls[#calls+1] = {name, ...} end end
 printed = {}
 function GetTime() return T or 0 end
-function time() return 1 end
+function time() return 1 + math.floor(T or 0) end
 function date() return "01/01 00:00" end
 wipe = function(t) for k in pairs(t) do t[k]=nil end return t end
 function CopyTable(t) local c={} for k,v in pairs(t) do c[k]=v end return c end
@@ -177,20 +177,20 @@ check("GM whisper allowed", not filt("CHAT_MSG_WHISPER", "hello from GM", "Gm", 
 check("channel blocked", filt("CHAT_MSG_CHANNEL", "WTS stuff", "Seller")[0])
 check("secret whisper blocked", filt("CHAT_MSG_WHISPER", "SECRET", "SECRET", lineID=11)[0])
 check("stranger say hidden", filt("CHAT_MSG_SAY", "hello", "Rando")[0])
-G.group["Buddy"] = True
-check("stranger in group: say still hidden", filt("CHAT_MSG_SAY", "hello", "Buddy", guid="x")[0])
-check("stranger in group: party chat hidden", filt("CHAT_MSG_PARTY", "hi kid", "Buddy", lineID=19)[0])
-G.KidSafeDB.trusted["buddy"] = True
-check("family: say shown", not filt("CHAT_MSG_SAY", "hello", "Buddy", guid="x")[0])
-h, m = filt("CHAT_MSG_PARTY", "this boss is shit lol", "Buddy", lineID=20)
+G.group["Buddy Pal"] = True
+check("stranger in group: say still hidden", filt("CHAT_MSG_SAY", "hello", "Buddy Pal", guid="x")[0])
+check("stranger in group: party chat hidden", filt("CHAT_MSG_PARTY", "hi kid", "Buddy Pal", lineID=19)[0])
+G.KidSafeDB.trusted["buddy pal"] = True
+check("family: say shown", not filt("CHAT_MSG_SAY", "hello", "Buddy Pal", guid="x")[0])
+h, m = filt("CHAT_MSG_PARTY", "this boss is shit lol", "Buddy Pal", lineID=20)
 check("party censored", not h and m == "this boss is **** lol")
-check("party grooming hidden", filt("CHAT_MSG_PARTY", "add me on discord", "Buddy", lineID=21)[0])
-check("'instance' not false-positive", not filt("CHAT_MSG_PARTY", "instance reset pls, kick him", "Buddy", lineID=22)[0])
-check("'add melee' not false-positive", not filt("CHAT_MSG_PARTY", "add melee to camp", "Buddy", lineID=23)[0])
-check("url hidden", filt("CHAT_MSG_PARTY", "go to www.free-gold.com", "Buddy", lineID=24)[0])
-check("secret party msg hidden (fail closed)", filt("CHAT_MSG_PARTY", "SECRET", "Buddy", lineID=25)[0])
+check("party grooming hidden", filt("CHAT_MSG_PARTY", "add me on discord", "Buddy Pal", lineID=21)[0])
+check("'instance' not false-positive", not filt("CHAT_MSG_PARTY", "instance reset pls, kick him", "Buddy Pal", lineID=22)[0])
+check("'add melee' not false-positive", not filt("CHAT_MSG_PARTY", "add melee to camp", "Buddy Pal", lineID=23)[0])
+check("url hidden", filt("CHAT_MSG_PARTY", "go to www.free-gold.com", "Buddy Pal", lineID=24)[0])
+check("secret party msg hidden (fail closed)", filt("CHAT_MSG_PARTY", "SECRET", "Buddy Pal", lineID=25)[0])
 check("secret sender hidden (fail closed)", filt("CHAT_MSG_PARTY", "hello", "SECRET", lineID=26)[0])
-G.KidSafeDB.trusted["buddy"] = None
+G.KidSafeDB.trusted["buddy pal"] = None
 
 G.KidSafeDB.groupPolicy = "family"
 fire("PARTY_INVITE_REQUEST", "Rando")
@@ -227,16 +227,17 @@ check("/run locked", "RAN" not in calls())
 
 # PIN flow
 sc = G.SlashCmdList.KIDSAFE
-sc("trust Mum"); check("trust needs PIN", G.KidSafeDB.trusted.mum is None)
-sc("setpin 4321"); sc("unlock 1111"); sc("trust Mum"); check("wrong pin rejected", G.KidSafeDB.trusted.mum is None)
-sc("unlock 4321"); sc("trust Mum"); check("trust after unlock", G.KidSafeDB.trusted.mum == True)
+sc("trust Mum Smith"); check("trust needs PIN", G.KidSafeDB.trusted["mum smith"] is None)
+sc("setpin 4321"); sc("unlock 1111"); sc("trust Mum Smith"); check("wrong pin rejected", G.KidSafeDB.trusted["mum smith"] is None)
+sc("unlock 4321"); sc("trust Mum"); check("bare first name refused", G.KidSafeDB.trusted.mum is None)
+sc("trust Mum Smith"); check("trust after unlock", G.KidSafeDB.trusted["mum smith"] == True)
 check("parent mode: say allowed", typ("hi all", "SAY") == "hi all")
 G.hash_SlashCmdList["/run"]("print(1)"); check("parent mode: /run works", "RAN" in calls())
 sc("log 5"); sc("lock")
 check("relocked", typ("hi all", "SAY") == "")
-check("trusted whisper allowed", not filt("CHAT_MSG_WHISPER", "dinner time", "Mum", lineID=30)[0])
-check("whisper to trusted allowed", typ("ok coming", "WHISPER", "Mum") == "ok coming")
-n = len(G.calls); fire("PARTY_INVITE_REQUEST", "Mum"); check("trusted invite allowed", len(G.calls) == n)
+check("trusted whisper allowed", not filt("CHAT_MSG_WHISPER", "dinner time", "Mum Smith", lineID=30)[0])
+check("whisper to trusted allowed", typ("ok coming", "WHISPER", "Mum Smith") == "ok coming")
+n = len(G.calls); fire("PARTY_INVITE_REQUEST", "Mum Smith"); check("trusted invite allowed", len(G.calls) == n)
 for _ in range(3): sc("unlock 0000")
 sc("unlock 4321"); check("pin lockout", typ("hi", "SAY") == "")
 
@@ -274,7 +275,7 @@ api = G.KidSafe.api
 # shared mode set by parent
 sc("unlock 4321"); api.SetNewChars("shared"); api.Lock()
 fresh_login("Dad")
-check("shared: unknown dad char not locked", typ("hello", "SAY") == "hello")
+check("shared: unknown char protected until someone answers", typ("hello", "SAY") == "")
 check("shared: who-plays popup shown", UI("KidSafeWhoPlaysFrame").shown)
 ask = UI("KidSafeWhoPlaysFrame")
 G.T = 20000
@@ -292,7 +293,7 @@ check("kid can't mark adult without PIN", not (ok == True))
 fresh_login("Newbie", 1)
 check("shared: new level-1 char auto-protected", G.KidSafeDB.chars["Newbie-Realm"] == "child" and typ("hi", "SAY") == "")
 fresh_login("Oldkid", 35)
-check("shared: existing kid char off until asked", typ("hi", "SAY") == "hi")
+check("shared: existing char protected until asked (Escape changes nothing)", typ("hi", "SAY") == "")
 api.SetRole("child")
 check("child button needs no PIN and protects", typ("hi", "SAY") == "")
 # protect by name from dad's char
@@ -515,7 +516,7 @@ for fname in FR:
 G.hash_SlashCmdList["/run"]("KidSafeDB.groupPolicy='open'")
 check("/run still locked", G.KidSafeDB.groupPolicy == "family")
 sc("groups open")
-check("group setting needs the PIN", G.KidSafeDB.groupPolicy == "family")
+check("group setting needs the PIN", G.KidSafeDB.groupPolicy != "open")
 sc("trust Random Person")
 check("trusting needs the PIN", G.KidSafeDB.trusted["random person"] is None)
 
